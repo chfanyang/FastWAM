@@ -9,6 +9,8 @@ runs
 runs/
 evaluate_results/
 .deepspeed*
+third_party/RoboTwin/assets
+third_party/RoboTwin/policy/fastwam_policy
 
 
 # ai coding
