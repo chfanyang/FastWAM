@@ -12,6 +12,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from hydra.utils import instantiate
 from .base_lerobot_dataset import BaseLerobotDataset
+from .robotwin_tasks import resolve_robotwin_episode_indices
 from .utils.normalizer import save_dataset_stats_to_json, load_dataset_stats_from_json
 from ..dataset_utils import ResizeSmallestSideAspectPreserving, CenterCrop, Normalize
 from fastwam.utils.logging_config import get_logger
@@ -42,7 +43,18 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         max_padding_retry: int = 3,
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
+        robotwin_task_names=None,
     ):
+        episode_indices = None
+        if robotwin_task_names is not None:
+            robotwin_task_names = [str(name) for name in robotwin_task_names]
+            episode_indices = resolve_robotwin_episode_indices(robotwin_task_names)
+            logger.info(
+                "Selecting %d RoboTwin tasks (%d episodes): %s",
+                len(set(robotwin_task_names)),
+                len(episode_indices),
+                ", ".join(robotwin_task_names),
+            )
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
             shape_meta=OmegaConf.to_container(shape_meta, resolve=True),
@@ -51,6 +63,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             val_set_proportion=val_set_proportion,
             is_training_set=is_training_set,
             global_sample_stride=global_sample_stride,
+            episode_indices=episode_indices,
         )
     
         self.num_frames = num_frames

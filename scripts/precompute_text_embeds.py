@@ -10,10 +10,12 @@ from typing import Any
 import hydra
 import torch
 import torch.distributed as dist
+import pyarrow.parquet as pq
 from omegaconf import DictConfig, ListConfig
 from tqdm import tqdm
 
 from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
+from fastwam.datasets.lerobot.robotwin_tasks import resolve_robotwin_episode_indices
 from fastwam.models.wan22.helpers.loader import _load_registered_model, _resolve_configs
 from fastwam.models.wan22.wan_video_text_encoder import HuggingfaceTokenizer
 from fastwam.utils.config_resolvers import register_default_resolvers
@@ -68,7 +70,7 @@ def _iter_dataset_nodes(node: Any, path: str = "data"):
 
 
 def _collect_dataset_settings(data_cfg: DictConfig):
-    dataset_dirs: list[str] = []
+    dataset_selections: list[tuple[str, tuple[str, ...] | None]] = []
     cache_dirs: list[Path] = []
     context_lens = set()
 
@@ -85,9 +87,16 @@ def _collect_dataset_settings(data_cfg: DictConfig):
             )
 
         for ds in raw_dirs:
-            ds_str = str(ds)
-            if ds_str not in dataset_dirs:
-                dataset_dirs.append(ds_str)
+            ds_str = os.path.normpath(str(ds))
+            raw_task_names = node.get("robotwin_task_names")
+            task_names = (
+                tuple(str(name) for name in raw_task_names)
+                if raw_task_names is not None
+                else None
+            )
+            selection = (ds_str, task_names)
+            if selection not in dataset_selections:
+                dataset_selections.append(selection)
 
         cache_dir_path = Path(str(cache_dir)).expanduser()
         if cache_dir_path not in cache_dirs:
@@ -99,7 +108,14 @@ def _collect_dataset_settings(data_cfg: DictConfig):
 
         logger.info("Discovered dataset node `%s` with %d dataset_dirs.", node_path, len(raw_dirs))
 
-    return dataset_dirs, cache_dirs, context_lens
+    # A full-dataset selection supersedes subset selections for the same directory.
+    full_dataset_dirs = {ds_dir for ds_dir, task_names in dataset_selections if task_names is None}
+    dataset_selections = [
+        selection
+        for selection in dataset_selections
+        if selection[1] is None or selection[0] not in full_dataset_dirs
+    ]
+    return dataset_selections, cache_dirs, context_lens
 
 
 def _resolve_context_len(context_lens: set[int]) -> int:
@@ -111,15 +127,45 @@ def _resolve_context_len(context_lens: set[int]) -> int:
     return next(iter(context_lens))
 
 
-def _read_unique_prompts(dataset_dirs: list[str]) -> list[str]:
+def _read_task_indices_for_episodes(ds_dir: Path, episode_indices: list[int]) -> set[int]:
+    task_indices: set[int] = set()
+    for episode_index in tqdm(episode_indices, desc=f"Scanning {ds_dir.name} episode tasks"):
+        parquet_path = (
+            ds_dir
+            / "data"
+            / f"chunk-{episode_index // 1000:03d}"
+            / f"episode_{episode_index:06d}.parquet"
+        )
+        if not parquet_path.exists():
+            raise FileNotFoundError(f"Missing episode parquet: {parquet_path}")
+        values = pq.read_table(parquet_path, columns=["task_index"])["task_index"].to_pylist()
+        task_indices.update(int(value) for value in values)
+    return task_indices
+
+
+def _read_unique_prompts(
+    dataset_selections: list[tuple[str, tuple[str, ...] | None]],
+) -> list[str]:
     prompts: list[str] = []
     seen = set()
     total_task_rows = 0
 
-    for ds_dir in dataset_dirs:
-        tasks_path = Path(ds_dir) / "meta" / "tasks.jsonl"
+    for ds_dir_str, task_names in dataset_selections:
+        ds_dir = Path(ds_dir_str)
+        tasks_path = ds_dir / "meta" / "tasks.jsonl"
         if not tasks_path.exists():
             raise FileNotFoundError(f"Missing tasks file: {tasks_path}")
+
+        selected_task_indices = None
+        if task_names is not None:
+            episode_indices = resolve_robotwin_episode_indices(task_names)
+            selected_task_indices = _read_task_indices_for_episodes(ds_dir, episode_indices)
+            logger.info(
+                "Selected %d text instructions from %d RoboTwin episodes for tasks: %s",
+                len(selected_task_indices),
+                len(episode_indices),
+                ", ".join(task_names),
+            )
 
         with tasks_path.open("r", encoding="utf-8") as f:
             for line_idx, line in enumerate(f, start=1):
@@ -129,6 +175,11 @@ def _read_unique_prompts(dataset_dirs: list[str]) -> list[str]:
                 record = json.loads(line)
                 if "task" not in record:
                     raise KeyError(f"Missing `task` field at {tasks_path}:{line_idx}")
+                if (
+                    selected_task_indices is not None
+                    and int(record["task_index"]) not in selected_task_indices
+                ):
+                    continue
                 task = str(record["task"])
                 prompt = DEFAULT_PROMPT.format(task=task)
                 total_task_rows += 1
@@ -139,7 +190,7 @@ def _read_unique_prompts(dataset_dirs: list[str]) -> list[str]:
     logger.info(
         "Loaded %d task rows from %d datasets, deduplicated to %d prompts.",
         total_task_rows,
-        len(dataset_dirs),
+        len(dataset_selections),
         len(prompts),
     )
     return prompts
@@ -187,7 +238,7 @@ def main(cfg: DictConfig):
     if cfg.data is None:
         raise ValueError("`cfg.data` is required.")
 
-    dataset_dirs, cache_dirs, context_lens = _collect_dataset_settings(cfg.data)
+    dataset_selections, cache_dirs, context_lens = _collect_dataset_settings(cfg.data)
     if not cache_dirs:
         raise ValueError("No `text_embedding_cache_dir` found under `cfg.data`.")
 
@@ -197,9 +248,9 @@ def main(cfg: DictConfig):
         prompts = [override_prompt]
         logger.info("Using override_instruction; skipping dataset scan and encoding exactly 1 prompt.")
     else:
-        if not dataset_dirs:
+        if not dataset_selections:
             raise ValueError("No `dataset_dirs` found under `cfg.data`.")
-        prompts = _read_unique_prompts(dataset_dirs)
+        prompts = _read_unique_prompts(dataset_selections)
     if not prompts:
         logger.warning("No prompts found from tasks.jsonl; nothing to do.")
         return

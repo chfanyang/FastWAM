@@ -242,6 +242,25 @@ For multi-GPU:
 torchrun --standalone --nproc_per_node=8 scripts/precompute_text_embeds.py task=libero_uncond_2cam224_1e-4
 ```
 
+To train on a small subset of the released RoboTwin dataset, pass the same
+`robotwin_task_names` list to both the training and validation datasets. For
+example, to select only `click_alarmclock` (episodes 2200 through 2749):
+
+```bash
+torchrun --standalone --nproc_per_node=4 scripts/precompute_text_embeds.py \
+  task=robotwin_uncond_3cam_384_1e-4 \
+  'data.train.robotwin_task_names=[click_alarmclock]' \
+  'data.val.robotwin_task_names=[click_alarmclock]' \
+  +overwrite=false
+```
+
+Multiple tasks can be selected in one list, for example
+`[click_alarmclock,click_bell]`. The released dataset contains 550 contiguous
+episodes per RoboTwin task. Subset embedding precomputation reads the selected
+episode parquet files and follows each frame's `task_index` into
+`meta/tasks.jsonl`, so it only encodes instructions actually used by the
+selected tasks.
+
 ### 2) Training (using `fastwam` as an example)
 
 When running a new task for the first time, set `pretrained_norm_stats` in the corresponding `configs/data/*.yaml` to `null` first.
@@ -254,6 +273,15 @@ bash scripts/train_zero1.sh 8 task=libero_uncond_2cam224_1e-4
 
 # RoboTwin
 bash scripts/train_zero1.sh 8 task=robotwin_uncond_3cam_384_1e-4
+```
+
+Use the same overrides for subset training:
+
+```bash
+bash scripts/train_zero1.sh 4 \
+  task=robotwin_uncond_3cam_384_1e-4 \
+  'data.train.robotwin_task_names=[click_alarmclock]' \
+  'data.val.robotwin_task_names=[click_alarmclock]'
 ```
 
 For LIBERO, we train on a single node with 8 GPUs. For RoboTwin, we use 64 GPUs to accelerate training. You can try reducing the GPU count or training epochs.

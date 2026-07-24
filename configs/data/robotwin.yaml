@@ -2,6 +2,7 @@ train:
   _target_: fastwam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
   dataset_dirs:
     - ./data/robotwin2.0/robotwin2.0
+  robotwin_task_names: null
   shape_meta:
     images:
       - key: cam_high
@@ -65,6 +66,7 @@ val:
   _target_: fastwam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
   dataset_dirs:
     - ./data/robotwin2.0/robotwin2.0/
+  robotwin_task_names: null
   shape_meta:
     images:
       - key: cam_high

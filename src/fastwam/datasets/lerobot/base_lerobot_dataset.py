@@ -33,6 +33,7 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
 
         # sampling
         global_sample_stride: int = 1,
+        episode_indices: Optional[List[int]] = None,
     ):
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
         assert past_action_size == 0
@@ -86,20 +87,38 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
             delta_timestamps[meta["lerobot_key"]] = [(t * global_sample_stride) / fps for t in range(-past_action_size, -past_action_size + action_size)]
 
         episodes = {}
+        if episode_indices is not None:
+            requested_episode_indices = list(dict.fromkeys(int(i) for i in episode_indices))
+        else:
+            requested_episode_indices = None
         if val_set_proportion < 1e-6:
             for meta in metas:
-                episodes.update({meta.repo_id: list(range(meta.total_episodes))})
+                available_indices = (
+                    list(range(meta.total_episodes))
+                    if requested_episode_indices is None
+                    else requested_episode_indices
+                )
+                self._validate_episode_indices(available_indices, meta.total_episodes, meta.repo_id)
+                episodes.update({meta.repo_id: available_indices})
         else:
             for meta in metas:
-                split_idx = int(meta.total_episodes * (1 - val_set_proportion))
+                episode_indices_for_meta = (
+                    list(range(meta.total_episodes))
+                    if requested_episode_indices is None
+                    else requested_episode_indices.copy()
+                )
+                self._validate_episode_indices(
+                    episode_indices_for_meta, meta.total_episodes, meta.repo_id
+                )
+                split_idx = int(len(episode_indices_for_meta) * (1 - val_set_proportion))
                 # random shuffle episode indices before splitting
-                episode_indices = list(range(meta.total_episodes))
                 rng = np.random.default_rng(seed)
-                rng.shuffle(episode_indices)
+                rng.shuffle(episode_indices_for_meta)
                 if self.is_training_set:
-                    episodes.update({meta.repo_id: [episode_indices[i] for i in range(split_idx)]})
+                    selected = episode_indices_for_meta[:split_idx]
                 else:
-                    episodes.update({meta.repo_id: [episode_indices[i] for i in range(split_idx, meta.total_episodes)]})
+                    selected = episode_indices_for_meta[split_idx:]
+                episodes.update({meta.repo_id: selected})
 
         self.multi_dataset = MultiLeRobotDataset(
             dataset_dirs=self.dataset_dirs,
@@ -122,6 +141,15 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
             "from": torch.cat([dataset["from"] for dataset in episode_data_index]),
             "to": torch.cat([dataset["to"] for dataset in episode_data_index]),
         }
+
+    @staticmethod
+    def _validate_episode_indices(episode_indices, total_episodes, repo_id):
+        invalid = [i for i in episode_indices if i < 0 or i >= total_episodes]
+        if invalid:
+            raise ValueError(
+                f"Episode indices out of range for {repo_id} with {total_episodes} episodes: "
+                f"{invalid[:10]}"
+            )
 
     def _get_action(self, meta, lerobot_sample) -> torch.Tensor:
         key, lerobot_key, raw_shape = meta["key"], meta["lerobot_key"], meta["raw_shape"]
