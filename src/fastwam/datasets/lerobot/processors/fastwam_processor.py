@@ -276,6 +276,10 @@ class FastWAMProcessor(BaseProcessor):
         assert sample["proprio"].shape[-1] == self.proprio_output_dim
 
         sample["idx"] = data["idx"]
+        if data.get("raw_action"):
+            sample["raw_action"] = data["raw_action"]
+        if data.get("raw_state"):
+            sample["raw_state"] = data["raw_state"]
 
         # sample = self.tokenizer(sample)
         

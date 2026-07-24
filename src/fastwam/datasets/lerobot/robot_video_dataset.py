@@ -17,6 +17,7 @@ from .utils.normalizer import save_dataset_stats_to_json, load_dataset_stats_fro
 from ..dataset_utils import ResizeSmallestSideAspectPreserving, CenterCrop, Normalize
 from fastwam.utils.logging_config import get_logger
 from fastwam.utils import misc, pytorch_utils
+from fastwam.representations.rothko import RothkoCodec, RothkoCodecConfig
 from accelerate import PartialState
 logger = get_logger(__name__)
 
@@ -44,6 +45,10 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
         robotwin_task_names=None,
+        raw_action_meta=None,
+        raw_state_meta=None,
+        raymap_representation: Optional[str] = None,
+        rothko_norm_stats: Optional[str] = None,
     ):
         episode_indices = None
         if robotwin_task_names is not None:
@@ -64,6 +69,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             is_training_set=is_training_set,
             global_sample_stride=global_sample_stride,
             episode_indices=episode_indices,
+            raw_action_meta=raw_action_meta,
+            raw_state_meta=raw_state_meta,
         )
     
         self.num_frames = num_frames
@@ -85,6 +92,29 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         self.max_padding_retry = max_padding_retry
         self.concat_multi_camera = concat_multi_camera
         self.override_instruction = override_instruction
+        self.raymap_representation = raymap_representation
+        self.raymap_codec = None
+        if raymap_representation is not None:
+            if raymap_representation != "rothko":
+                raise ValueError(
+                    "Only raymap_representation='rothko' is implemented in the first version, "
+                    f"got {raymap_representation!r}."
+                )
+            if action_video_freq_ratio != 1:
+                raise ValueError(
+                    "Video-only Rothko training requires RGB/action frequency ratio 1, "
+                    f"got {action_video_freq_ratio}."
+                )
+            if rothko_norm_stats is None:
+                raise ValueError("`rothko_norm_stats` is required for Rothko training.")
+            codec_config = RothkoCodecConfig(
+                image_height=int(video_size[0]),
+                image_width=int(video_size[1]),
+            )
+            self.raymap_codec = RothkoCodec(
+                config=codec_config,
+                norm_stats=rothko_norm_stats,
+            )
 
         self.resize_transform = ResizeSmallestSideAspectPreserving(
             args={"img_w": self.video_size[1], "img_h": self.video_size[0]},
@@ -232,7 +262,61 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         # NOTE: to keep consistent with wan2.2's behavior
         context[~context_mask] = 0.0
         context_mask = torch.ones_like(context_mask)
-        
+
+        raymap_video = None
+        raymap_is_pad = None
+        current_endpose = None
+        future_endpose = None
+        future_gripper = None
+        if self.raymap_codec is not None:
+            raw_action = sample.get("raw_action") or {}
+            raw_state = sample.get("raw_state") or {}
+            required_raw = {
+                "raw_action.default": raw_action.get("default"),
+                "raw_action.endpose": raw_action.get("endpose"),
+                "raw_state.default": raw_state.get("default"),
+                "raw_state.endpose": raw_state.get("endpose"),
+            }
+            missing = [name for name, value in required_raw.items() if value is None]
+            if missing:
+                raise ValueError(
+                    "Rothko dataset is missing raw side-channel fields: "
+                    + ", ".join(missing)
+                )
+            raw_action_qpos = raw_action["default"].float()
+            raw_state_qpos = raw_state["default"].float()
+            action_endpose = raw_action["endpose"].float()
+            state_endpose = raw_state["endpose"].float()
+            if action_endpose.shape != (self.num_frames - 1, 14):
+                raise ValueError(
+                    f"Expected action endpose {(self.num_frames - 1, 14)}, "
+                    f"got {tuple(action_endpose.shape)}."
+                )
+            if state_endpose.shape != (self.num_frames, 14):
+                raise ValueError(
+                    f"Expected state endpose {(self.num_frames, 14)}, "
+                    f"got {tuple(state_endpose.shape)}."
+                )
+
+            current_endpose = state_endpose[0]
+            future_endpose = action_endpose
+            pose_sequence = torch.cat((current_endpose.unsqueeze(0), future_endpose), dim=0)
+            current_gripper = raw_state_qpos[0, [6, 13]]
+            future_gripper = raw_action_qpos[:, [6, 13]]
+            gripper_sequence = torch.cat(
+                (current_gripper.unsqueeze(0), future_gripper), dim=0
+            )
+            raymap_video = self.raymap_codec.encode(
+                pose_sequence, gripper_sequence
+            )
+            raymap_is_pad = torch.cat(
+                (
+                    sample["proprio_is_pad"][:1].bool(),
+                    sample["action_is_pad"].bool(),
+                ),
+                dim=0,
+            )
+
         data = {
             "video": video,
             "action": action,
@@ -244,6 +328,16 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             "action_is_pad": sample["action_is_pad"],
             "proprio_is_pad": sample["proprio_is_pad"],
         }
+        if raymap_video is not None:
+            data.update(
+                {
+                    "raymap": raymap_video,
+                    "raymap_is_pad": raymap_is_pad,
+                    "current_endpose": current_endpose,
+                    "future_endpose": future_endpose,
+                    "future_gripper": future_gripper,
+                }
+            )
         return data
 
     def _get_cached_text_context(self, prompt: str):

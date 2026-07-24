@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional, Sequence
 from einops import rearrange
 from .helpers.gradient import gradient_checkpoint_forward
 
@@ -475,6 +475,7 @@ class WanVideoDiT(torch.nn.Module):
         video_seq_len: int,
         video_tokens_per_frame: int,
         device: torch.device,
+        condition_frame_indices: Optional[Sequence[int]] = None,
     ) -> torch.Tensor:
         if video_seq_len <= 0:
             raise ValueError(f"`video_seq_len` must be positive, got {video_seq_len}")
@@ -504,6 +505,42 @@ class WanVideoDiT(torch.nn.Module):
             video_mask[:first_frame_tokens, first_frame_tokens:] = False
             return video_mask
 
+        if self.video_attention_mask_mode == "condition_frames_causal":
+            if video_seq_len % video_tokens_per_frame != 0:
+                raise ValueError(
+                    "`video_seq_len` must be divisible by `video_tokens_per_frame` in "
+                    "condition_frames_causal mode."
+                )
+            if not condition_frame_indices:
+                raise ValueError(
+                    "condition_frames_causal mode requires non-empty "
+                    "`condition_frame_indices`."
+                )
+            num_frames = video_seq_len // video_tokens_per_frame
+            condition_indices = sorted(set(int(index) for index in condition_frame_indices))
+            if condition_indices[0] < 0 or condition_indices[-1] >= num_frames:
+                raise ValueError(
+                    f"Condition frame indices {condition_indices} are outside [0,{num_frames})."
+                )
+            mask = torch.ones(
+                (video_seq_len, video_seq_len), dtype=torch.bool, device=device
+            )
+            condition_token_mask = torch.zeros(
+                video_seq_len, dtype=torch.bool, device=device
+            )
+            for frame_index in condition_indices:
+                start = frame_index * video_tokens_per_frame
+                condition_token_mask[start : start + video_tokens_per_frame] = True
+            # Condition queries can see all condition frames (RGB0 and RAY0),
+            # but cannot leak information from either future block.
+            mask[condition_token_mask] = False
+            condition_to_condition = (
+                condition_token_mask.unsqueeze(1)
+                & condition_token_mask.unsqueeze(0)
+            )
+            mask[condition_to_condition] = True
+            return mask
+
         raise ValueError(f"Unsupported video attention mask mode: {self.video_attention_mask_mode}")
 
     def pre_dit(
@@ -515,6 +552,7 @@ class WanVideoDiT(torch.nn.Module):
         action: Optional[torch.Tensor] = None,
         fuse_vae_embedding_in_latents: bool = False,
         control_camera_latents_input: Optional[torch.Tensor] = None,
+        condition_latent_indices: Optional[Sequence[int]] = None,
     ) -> Dict[str, Any]:
         x, timestep, context_mask = self._validate_forward_inputs(
             x=x,
@@ -543,7 +581,19 @@ class WanVideoDiT(torch.nn.Module):
                 dtype=timestep.dtype,
                 device=timestep.device,
             ) * timestep.view(batch_size, 1, 1)
-            token_timesteps[:, 0, :] = 0
+            condition_indices = (
+                [0]
+                if condition_latent_indices is None
+                else sorted(set(int(index) for index in condition_latent_indices))
+            )
+            if not condition_indices:
+                raise ValueError("At least one condition latent index is required.")
+            if condition_indices[0] < 0 or condition_indices[-1] >= x.shape[2]:
+                raise ValueError(
+                    f"Condition latent indices {condition_indices} are outside "
+                    f"[0,{x.shape[2]})."
+                )
+            token_timesteps[:, condition_indices, :] = 0
             token_timesteps = token_timesteps.reshape(batch_size, -1)
             token_t_emb = sinusoidal_embedding_1d(self.freq_dim, token_timesteps.reshape(-1))
             t = self.time_embedding(token_t_emb).reshape(batch_size, -1, self.hidden_dim)
@@ -616,6 +666,7 @@ class WanVideoDiT(torch.nn.Module):
                 "grid_size": (f, h, w),
                 "tokens_per_frame": tokens_per_frame,
                 "batch_size": batch_size,
+                "condition_latent_indices": condition_indices,
             },
         }
 
@@ -633,6 +684,7 @@ class WanVideoDiT(torch.nn.Module):
         context_mask: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
         fuse_vae_embedding_in_latents: bool = False,
+        condition_latent_indices: Optional[Sequence[int]] = None,
     ):
         pre_state = self.pre_dit(
             x=x,
@@ -641,6 +693,7 @@ class WanVideoDiT(torch.nn.Module):
             context_mask=context_mask,
             action=action,
             fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
+            condition_latent_indices=condition_latent_indices,
         )
         x_tokens = pre_state["tokens"]
         context_emb = pre_state["context"]
@@ -651,6 +704,7 @@ class WanVideoDiT(torch.nn.Module):
             video_seq_len=x_tokens.shape[1],
             video_tokens_per_frame=int(pre_state["meta"]["tokens_per_frame"]),
             device=x_tokens.device,
+            condition_frame_indices=pre_state["meta"]["condition_latent_indices"],
         ) if self.video_attention_mask_mode != "bidirectional" else None # special rule for faster speed
 
         for block in self.blocks:

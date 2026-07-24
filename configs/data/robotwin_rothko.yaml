@@ -1,0 +1,115 @@
+train:
+  _target_: fastwam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
+  dataset_dirs:
+    - ./data/robotwin2.0/robotwin2.0
+  robotwin_task_names:
+    - click_alarmclock
+  shape_meta:
+    images:
+      - key: cam_high
+        raw_shape: [3, 480, 640]
+        shape: [3, 240, 320]
+      - key: cam_left_wrist
+        raw_shape: [3, 480, 640]
+        shape: [3, 240, 320]
+      - key: cam_right_wrist
+        raw_shape: [3, 480, 640]
+        shape: [3, 240, 320]
+    action:
+      - key: default
+        raw_shape: 14
+        shape: 14
+    state:
+      - key: default
+        raw_shape: 14
+        shape: 14
+  raw_action_meta:
+    - key: default
+      raw_shape: 14
+    - key: endpose
+      raw_shape: 14
+  raw_state_meta:
+    - key: default
+      raw_shape: 14
+    - key: endpose
+      raw_shape: 14
+  num_frames: 17
+  global_sample_stride: 1
+  action_video_freq_ratio: 1
+  video_size: [384, 320]
+  camera_key: null
+  val_set_proportion: 0.01
+  is_training_set: true
+  pretrained_norm_stats: ./data/robotwin2.0/dataset_stats.json
+  skip_padding_as_possible: false
+  concat_multi_camera: robotwin
+  raymap_representation: rothko
+  rothko_norm_stats: ./data/robotwin2.0/rothko_region_symmetric_q99p95_h16_384x320.pt
+  processor:
+    _target_: fastwam.datasets.lerobot.processors.fastwam_processor.FastWAMProcessor
+    shape_meta: ${data.train.shape_meta}
+    num_obs_steps: ${data.train.num_frames}
+    num_output_cameras: 3
+    action_output_dim: 14
+    proprio_output_dim: 14
+    action_state_transforms: null
+    use_stepwise_action_norm: false
+    norm_default_mode: z-score
+    norm_exception_mode: null
+    action_state_merger:
+      _target_: fastwam.datasets.lerobot.transforms.action_state_merger.ConcatLeftAlign
+    train_transforms:
+      - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+      - _target_: torchvision.transforms.Resize
+        size: [240, 320]
+    val_transforms:
+      - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+      - _target_: torchvision.transforms.Resize
+        size: [240, 320]
+  text_embedding_cache_dir: ./data/text_embeds_cache/robotwin
+  context_len: 128
+
+val:
+  _target_: fastwam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
+  dataset_dirs:
+    - ./data/robotwin2.0/robotwin2.0
+  robotwin_task_names:
+    - click_alarmclock
+  shape_meta: ${data.train.shape_meta}
+  raw_action_meta: ${data.train.raw_action_meta}
+  raw_state_meta: ${data.train.raw_state_meta}
+  num_frames: 17
+  global_sample_stride: 1
+  action_video_freq_ratio: 1
+  video_size: [384, 320]
+  camera_key: null
+  val_set_proportion: 0.01
+  is_training_set: false
+  pretrained_norm_stats: ./data/robotwin2.0/dataset_stats.json
+  skip_padding_as_possible: false
+  concat_multi_camera: robotwin
+  raymap_representation: rothko
+  rothko_norm_stats: ./data/robotwin2.0/rothko_region_symmetric_q99p95_h16_384x320.pt
+  processor:
+    _target_: fastwam.datasets.lerobot.processors.fastwam_processor.FastWAMProcessor
+    shape_meta: ${data.train.shape_meta}
+    num_obs_steps: ${data.val.num_frames}
+    num_output_cameras: 3
+    action_output_dim: 14
+    proprio_output_dim: 14
+    action_state_transforms: null
+    use_stepwise_action_norm: false
+    norm_default_mode: z-score
+    norm_exception_mode: null
+    action_state_merger:
+      _target_: fastwam.datasets.lerobot.transforms.action_state_merger.ConcatLeftAlign
+    train_transforms:
+      - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+      - _target_: torchvision.transforms.Resize
+        size: [240, 320]
+    val_transforms:
+      - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+      - _target_: torchvision.transforms.Resize
+        size: [240, 320]
+  text_embedding_cache_dir: ./data/text_embeds_cache/robotwin
+  context_len: 128

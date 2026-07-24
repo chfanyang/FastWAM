@@ -1,0 +1,45 @@
+# @package _global_
+
+defaults:
+  - override /data: robotwin_rothko
+  - override /model: fastwam_video_only_raymap
+  - _self_
+
+# Two 5-frame latent blocks produce 1200 DiT tokens, so start conservatively.
+batch_size: 1
+num_workers: 4
+
+data:
+  train:
+    robotwin_task_names:
+      - stack_bowls_three
+      - stack_blocks_three
+      - place_shoe
+      - lift_pot
+      - blocks_ranking_size
+      - click_alarmclock
+      - blocks_ranking_rgb
+      - turn_switch
+  val:
+    robotwin_task_names:
+      - stack_bowls_three
+      - stack_blocks_three
+      - place_shoe
+      - lift_pot
+      - blocks_ranking_size
+      - click_alarmclock
+      - blocks_ranking_rgb
+      - turn_switch
+
+lr_scheduler_type: cosine
+learning_rate: 1.0e-4
+num_epochs: 5
+max_steps: null
+log_every: 10
+save_every: 500
+eval_every: 100
+eval_num_inference_steps: 20
+
+gradient_accumulation_steps: 1
+weight_decay: 1.0e-2
+resume: null

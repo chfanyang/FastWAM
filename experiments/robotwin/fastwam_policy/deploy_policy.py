@@ -162,6 +162,10 @@ class WorldActionRobotWinPolicy:
         self.model = instantiate(model_cfg_copy, model_dtype=model_dtype, device=device)
         self.model.load_checkpoint(checkpoint_path)
         self.model = self.model.to(device).eval()
+        self.is_visual_action_model = bool(
+            getattr(self.model, "is_visual_action_model", False)
+        )
+        self.action_type = "ee" if self.is_visual_action_model else "qpos"
 
         self.processor: FastWAMProcessor = instantiate(processor_cfg).eval()
         dataset_stats = load_dataset_stats_from_json(str(dataset_stats_path))
@@ -185,11 +189,13 @@ class WorldActionRobotWinPolicy:
         self._timing_rollout = {"infer_s": 0.0, "sim_s": 0.0}
 
         logger.info(
-            "Initialized WorldActionRobotWinPolicy | ckpt=%s | stats=%s | horizon=%d | replan=%d",
+            "Initialized WorldActionRobotWinPolicy | ckpt=%s | stats=%s | "
+            "horizon=%d | replan=%d | action_type=%s",
             checkpoint_path,
             dataset_stats_path,
             self.action_horizon,
             self.replan_steps,
+            self.action_type,
         )
 
     def _normalize_state(self, state: np.ndarray) -> torch.Tensor:
@@ -233,12 +239,93 @@ class WorldActionRobotWinPolicy:
         image_tensor = image_tensor * (2.0 / 255.0) - 1.0
         return image_tensor
 
-    def _infer_action_chunk(self, observation: Dict[str, Any], instruction: str) -> np.ndarray:
+    def _build_current_raymap(
+        self, task_env
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        left_pose = np.asarray(
+            task_env.robot.get_left_ee_pose(), dtype=np.float32
+        )
+        right_pose = np.asarray(
+            task_env.robot.get_right_ee_pose(), dtype=np.float32
+        )
+        current_endpose = torch.from_numpy(
+            np.concatenate((left_pose, right_pose), axis=0)
+        ).unsqueeze(0)
+        gripper = torch.tensor(
+            [
+                [
+                    float(task_env.robot.get_left_gripper_val()),
+                    float(task_env.robot.get_right_gripper_val()),
+                ]
+            ],
+            dtype=torch.float32,
+        )
+        pose_sequence = current_endpose.unsqueeze(1)
+        gripper_sequence = gripper.unsqueeze(1)
+        raymap = self.model.raymap_codec.encode(
+            pose_sequence, gripper_sequence
+        )[:, :, 0]
+        return (
+            raymap.to(
+                device=self.model.device,
+                dtype=self.model.torch_dtype,
+            ),
+            current_endpose.to(
+                device=self.model.device,
+                dtype=self.model.torch_dtype,
+            ),
+        )
+
+    def _infer_action_chunk(
+        self,
+        task_env,
+        observation: Dict[str, Any],
+        instruction: str,
+    ) -> np.ndarray:
         image_tensor = self._build_robotwin_image_tensor(observation)
         state_vector = np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
         proprio = self._normalize_state(state_vector)
 
         prompt = DEFAULT_PROMPT.format(task=instruction)
+        if self.is_visual_action_model:
+            input_raymap, current_endpose = self._build_current_raymap(task_env)
+            infer_t0 = time.perf_counter() if self.timing_enabled else 0.0
+            with torch.no_grad():
+                pred = self.model.infer(
+                    prompt=prompt,
+                    input_image=image_tensor,
+                    input_raymap=input_raymap,
+                    proprio=proprio,
+                    current_endpose=current_endpose,
+                    num_frames=self._num_video_frames,
+                    num_inference_steps=self.num_inference_steps,
+                    sigma_shift=self.sigma_shift,
+                    seed=self.seed,
+                    rand_device=self.rand_device,
+                    tiled=self.tiled,
+                )
+            if self.timing_enabled:
+                self._timing_rollout["infer_s"] += time.perf_counter() - infer_t0
+            action_tensor = pred.get("action")
+            if not isinstance(action_tensor, torch.Tensor):
+                raise ValueError(
+                    "Visual-action inference did not return decoded EE `action`."
+                )
+            if action_tensor.ndim != 3 or action_tensor.shape[0] != 1:
+                raise ValueError(
+                    "Expected visual EE action [1,T,16], got "
+                    f"{tuple(action_tensor.shape)}."
+                )
+            if action_tensor.shape[1:] != (self.action_horizon, 16):
+                raise ValueError(
+                    "Visual EE action horizon/dimension mismatch: expected "
+                    f"(1,{self.action_horizon},16), got "
+                    f"{tuple(action_tensor.shape)}."
+                )
+            if not torch.isfinite(action_tensor).all():
+                raise ValueError("Visual EE action contains NaN or Inf.")
+            return action_tensor[0].to(dtype=torch.float32, device="cpu").numpy()
+
         infer_kwargs = {
             "prompt": prompt,
             "input_image": image_tensor,
@@ -264,8 +351,17 @@ class WorldActionRobotWinPolicy:
         action_chunk = self._denormalize_action(action_tensor)[0]  # [T, D]
         return action_chunk
 
-    def _fill_action_queue(self, observation: Dict[str, Any], instruction: str) -> None:
-        action_chunk = self._infer_action_chunk(observation=observation, instruction=instruction)
+    def _fill_action_queue(
+        self,
+        task_env,
+        observation: Dict[str, Any],
+        instruction: str,
+    ) -> None:
+        action_chunk = self._infer_action_chunk(
+            task_env=task_env,
+            observation=observation,
+            instruction=instruction,
+        )
         n_exec = min(self.replan_steps, action_chunk.shape[0])
         for i in range(n_exec):
             self.pending_actions.append(np.asarray(action_chunk[i], dtype=np.float32))
@@ -281,7 +377,11 @@ class WorldActionRobotWinPolicy:
                     "(replan step for fastwam)."
                 )
             instruction = task_env.get_instruction()
-            self._fill_action_queue(observation=observation, instruction=instruction)
+            self._fill_action_queue(
+                task_env=task_env,
+                observation=observation,
+                instruction=instruction,
+            )
 
         if not self.pending_actions:
             logger.warning("No action generated; skip current eval step.")
@@ -289,7 +389,7 @@ class WorldActionRobotWinPolicy:
 
         action = self.pending_actions.popleft()
         sim_t0 = time.perf_counter() if self.timing_enabled else 0.0
-        task_env.take_action(action, action_type="qpos")
+        task_env.take_action(action, action_type=self.action_type)
         if self.timing_enabled:
             self._timing_rollout["sim_s"] += time.perf_counter() - sim_t0
         self.step_count += 1

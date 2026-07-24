@@ -363,7 +363,7 @@ class Wan22Trainer:
                     f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
                 )
 
-        return {
+        output = {
             "video": video,
             "prompt": prompt,
             "action": action,
@@ -372,6 +372,144 @@ class Wan22Trainer:
             "context_mask": context_mask,
             "action_horizon": action_horizon,
         }
+        optional_tensor_dims = {
+            "raymap": 4,
+            "image_is_pad": 1,
+            "raymap_is_pad": 1,
+            "current_endpose": 1,
+            "future_endpose": 2,
+            "future_gripper": 2,
+        }
+        for key, unbatched_dim in optional_tensor_dims.items():
+            value = sample.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"`sample[{key!r}]` must be a tensor, got {type(value)}")
+            if value.ndim == unbatched_dim:
+                value = value.unsqueeze(0)
+            if value.ndim != unbatched_dim + 1:
+                raise ValueError(
+                    f"`sample[{key!r}]` must have {unbatched_dim} or "
+                    f"{unbatched_dim + 1} dims, got {tuple(value.shape)}"
+                )
+            output[key] = value
+        return output
+
+    @torch.no_grad()
+    def _evaluate_visual_action(self, model, sample, was_dit_training):
+        with self.accelerator.autocast():
+            val_loss, _ = model.training_loss(sample)
+            val_loss_value = float(val_loss.float().item())
+
+        video0 = sample["video"][0]
+        raymap0 = sample["raymap"][0]
+        proprio0 = sample["proprio"][0, 0]
+        infer_kwargs = {
+            "prompt": None,
+            "input_image": video0[:, 0].unsqueeze(0),
+            "input_raymap": raymap0[:, 0].unsqueeze(0),
+            "proprio": proprio0,
+            "current_endpose": sample["current_endpose"][0],
+            "context": sample["context"][0],
+            "context_mask": sample["context_mask"][0],
+            "num_frames": video0.shape[1],
+            "num_inference_steps": self.eval_num_inference_steps,
+            "seed": 42,
+            "tiled": False,
+        }
+        prediction = model.infer(**infer_kwargs)
+        predicted_video = pil_frames_to_video_tensor(prediction["video"])
+        target_video = (
+            (video0.detach().float().cpu().clamp(-1, 1) + 1.0) * 0.5
+        ).contiguous()
+        if predicted_video.shape != target_video.shape:
+            raise ValueError(
+                f"Visual-action RGB shape mismatch: {predicted_video.shape} "
+                f"vs {target_video.shape}"
+            )
+        psnr_rollout_vs_gt = video_psnr(predicted_video, target_video)
+        ssim_rollout_vs_gt = video_ssim(predicted_video, target_video)
+
+        rgb_latents = model._encode_video_latents(
+            video0.unsqueeze(0).to(model.device, model.torch_dtype)
+        )
+        vae_video = model._decode_video_tensor(rgb_latents)[0]
+        vae_video = ((vae_video.cpu() + 1.0) * 0.5).clamp(0, 1)
+        psnr_decode_vs_gt = video_psnr(vae_video, target_video)
+        ssim_decode_vs_gt = video_ssim(vae_video, target_video)
+        psnr_rollout_vs_decode = video_psnr(predicted_video, vae_video)
+        ssim_rollout_vs_decode = video_ssim(predicted_video, vae_video)
+
+        predicted_action = prediction.get("action")
+        target_action = torch.cat(
+            (
+                sample["future_endpose"][:, :, :7],
+                sample["future_gripper"][:, :, 0:1],
+                sample["future_endpose"][:, :, 7:14],
+                sample["future_gripper"][:, :, 1:2],
+            ),
+            dim=-1,
+        ).cpu()
+        action_l1 = action_l2 = None
+        if predicted_action is not None:
+            difference = predicted_action.float().cpu() - target_action.float()
+            action_l1 = float(difference.abs().mean())
+            action_l2 = float(difference.square().mean())
+
+        stitched = torch.cat(
+            (predicted_video, vae_video, target_video), dim=2
+        ).contiguous()
+        stitched_frames = [
+            Image.fromarray(
+                (
+                    stitched[:, index]
+                    .permute(1, 2, 0)
+                    .clamp(0, 1)
+                    .numpy()
+                    * 255
+                ).astype(np.uint8)
+            )
+            for index in range(stitched.shape[1])
+        ]
+        video_path = os.path.join(
+            self.eval_dir,
+            f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}.mp4",
+        )
+        save_mp4(stitched_frames, video_path, fps=8)
+
+        metrics = torch.tensor(
+            [
+                val_loss_value,
+                psnr_rollout_vs_gt,
+                ssim_rollout_vs_gt,
+                psnr_rollout_vs_decode,
+                ssim_rollout_vs_decode,
+                psnr_decode_vs_gt,
+                ssim_decode_vs_gt,
+                -1.0 if action_l2 is None else action_l2,
+                -1.0 if action_l1 is None else action_l1,
+            ],
+            device=self.accelerator.device,
+            dtype=torch.float32,
+        ).unsqueeze(0)
+        gathered = self.accelerator.gather_for_metrics(metrics).mean(dim=0)
+        if was_dit_training:
+            self._set_dit_only_train_mode()
+        result = {
+            "val_loss": float(gathered[0]),
+            "psnr_rg": float(gathered[1]),
+            "ssim_rg": float(gathered[2]),
+            "psnr_rd": float(gathered[3]),
+            "ssim_rd": float(gathered[4]),
+            "psnr_dg": float(gathered[5]),
+            "ssim_dg": float(gathered[6]),
+            "video_path": video_path,
+        }
+        if action_l2 is not None:
+            result["action_l2"] = float(gathered[7])
+            result["action_l1"] = float(gathered[8])
+        return result
 
     @torch.no_grad()
     def evaluate(self):
@@ -386,6 +524,8 @@ class Wan22Trainer:
         rng = torch.Generator(device="cpu").manual_seed(self.global_step + self.accelerator.process_index)
         eval_index = torch.randint(0, len(self.val_dataset), (1,), generator=rng).item()
         sample = self._to_batched_eval_sample(self.val_dataset[eval_index])
+        if getattr(model, "is_visual_action_model", False):
+            return self._evaluate_visual_action(model, sample, was_dit_training)
 
         # 1. training loss
         with self.accelerator.autocast():

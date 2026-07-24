@@ -34,6 +34,8 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         # sampling
         global_sample_stride: int = 1,
         episode_indices: Optional[List[int]] = None,
+        raw_action_meta: Optional[List[Dict[str, Any]]] = None,
+        raw_state_meta: Optional[List[Dict[str, Any]]] = None,
     ):
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
         assert past_action_size == 0
@@ -65,6 +67,8 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         self.image_meta = shape_meta["images"]
         self.state_meta = shape_meta["state"]
         self.action_meta = shape_meta["action"]
+        self.raw_action_meta = [] if raw_action_meta is None else raw_action_meta
+        self.raw_state_meta = [] if raw_state_meta is None else raw_state_meta
 
         delta_timestamps = {}
         for meta in self.image_meta:
@@ -85,6 +89,27 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
             key = meta["key"]
             meta["lerobot_key"] = f"action.{key}" if key != "default" else "action"
             delta_timestamps[meta["lerobot_key"]] = [(t * global_sample_stride) / fps for t in range(-past_action_size, -past_action_size + action_size)]
+
+        # Raw side-channel fields are loaded on the same timelines but bypass
+        # transforms, normalization, and merging.  This is used by visual
+        # action representations which need metric EE poses and [0,1]
+        # grippers while retaining normalized qpos as proprioception.
+        for meta in self.raw_action_meta:
+            key = meta["key"]
+            meta["lerobot_key"] = f"action.{key}" if key != "default" else "action"
+            delta_timestamps[meta["lerobot_key"]] = [
+                (t * global_sample_stride) / fps
+                for t in range(-past_action_size, -past_action_size + action_size)
+            ]
+        for meta in self.raw_state_meta:
+            key = meta["key"]
+            meta["lerobot_key"] = (
+                f"observation.state.{key}" if key != "default" else "observation.state"
+            )
+            delta_timestamps[meta["lerobot_key"]] = [
+                (t * global_sample_stride) / fps
+                for t in range(-past_obs_size, -past_obs_size + obs_size)
+            ]
 
         episodes = {}
         if episode_indices is not None:
@@ -240,12 +265,19 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
             "action": {},
             "state": {},
             "images": {},
+            "raw_action": {},
+            "raw_state": {},
         }
         for meta in self.state_meta:
             sample["state"][meta["key"]] = self._get_state(meta, lerobot_sample)
 
         for meta in self.action_meta:
             sample["action"][meta["key"]] = self._get_action(meta, lerobot_sample)
+
+        for meta in self.raw_action_meta:
+            sample["raw_action"][meta["key"]] = self._get_action(meta, lerobot_sample)
+        for meta in self.raw_state_meta:
+            sample["raw_state"][meta["key"]] = self._get_state(meta, lerobot_sample)
 
         for meta in self.image_meta:
             sample["images"][meta["key"]] = self._get_image(meta, lerobot_sample)

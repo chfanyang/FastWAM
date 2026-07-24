@@ -158,6 +158,71 @@ def create_fastwam(
     )
 
 
+def create_fastwam_video_only_raymap(
+    model_id: str,
+    tokenizer_model_id: str,
+    video_dit_config,
+    tokenizer_max_len: int = 128,
+    load_text_encoder: bool = False,
+    proprio_dim: int | None = None,
+    redirect_common_files: bool = True,
+    skip_dit_load_from_pretrain: bool = False,
+    scheduler=None,
+    loss=None,
+    action_horizon: int = 16,
+    rothko_norm_stats: str | None = None,
+    rothko_config=None,
+    model_dtype: torch.dtype = torch.bfloat16,
+    device: str = "cuda",
+):
+    from .models.wan22.fastwam_visual_action import FastWAMVideoOnlyRaymap
+
+    if isinstance(video_dit_config, DictConfig):
+        video_dit_config = OmegaConf.to_container(video_dit_config, resolve=True)
+    if not isinstance(video_dit_config, dict):
+        raise ValueError(
+            f"`video_dit_config` must resolve to a dict, got {type(video_dit_config)}"
+        )
+    if isinstance(scheduler, DictConfig):
+        scheduler = OmegaConf.to_container(scheduler, resolve=True)
+    scheduler = {} if scheduler is None else scheduler
+    if not isinstance(scheduler, dict):
+        raise ValueError(f"`scheduler` must be dict-like, got {type(scheduler)}")
+    if isinstance(loss, DictConfig):
+        loss = OmegaConf.to_container(loss, resolve=True)
+    loss = {} if loss is None else loss
+    if not isinstance(loss, dict):
+        raise ValueError(f"`loss` must be dict-like, got {type(loss)}")
+    if isinstance(rothko_config, DictConfig):
+        rothko_config = OmegaConf.to_container(rothko_config, resolve=True)
+    rothko_config = {} if rothko_config is None else rothko_config
+    if not isinstance(rothko_config, dict):
+        raise ValueError(
+            f"`rothko_config` must be dict-like, got {type(rothko_config)}"
+        )
+
+    return FastWAMVideoOnlyRaymap.from_wan22_pretrained(
+        device=device,
+        torch_dtype=model_dtype,
+        model_id=model_id,
+        tokenizer_model_id=tokenizer_model_id,
+        tokenizer_max_len=int(tokenizer_max_len),
+        load_text_encoder=bool(load_text_encoder),
+        proprio_dim=None if proprio_dim is None else int(proprio_dim),
+        redirect_common_files=bool(redirect_common_files),
+        video_dit_config=video_dit_config,
+        skip_dit_load_from_pretrain=bool(skip_dit_load_from_pretrain),
+        train_shift=float(scheduler.get("train_shift", 5.0)),
+        infer_shift=float(scheduler.get("infer_shift", 5.0)),
+        num_train_timesteps=int(scheduler.get("num_train_timesteps", 1000)),
+        loss_lambda_rgb=float(loss.get("lambda_rgb", 1.0)),
+        loss_lambda_raymap=float(loss.get("lambda_raymap", 1.0)),
+        action_horizon=int(action_horizon),
+        rothko_norm_stats=rothko_norm_stats,
+        rothko_config=rothko_config,
+    )
+
+
 def create_fastwam_joint(
     model_id: str,
     tokenizer_model_id: str,
