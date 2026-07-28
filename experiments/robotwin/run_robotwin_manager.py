@@ -13,7 +13,7 @@ from typing import Any
 import hydra
 import yaml
 from hydra.core.hydra_config import HydraConfig
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SINGLE_ENTRY = PROJECT_ROOT / "experiments" / "robotwin" / "eval_robotwin_single.py"
@@ -53,6 +53,7 @@ def _is_blocked_override(raw_override: str) -> bool:
         "ckpt",
         "gpu_id",
         "EVALUATION.task_name",
+        "EVALUATION.task_names",
         "EVALUATION.task_config",
         "EVALUATION.output_dir",
     }:
@@ -81,6 +82,91 @@ def _load_all_tasks() -> list[str]:
         seen.add(task)
         dedup_tasks.append(task)
     return dedup_tasks
+
+
+def _normalize_task_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        names = [value.strip()]
+    elif isinstance(value, (list, tuple, ListConfig)):
+        names = [str(item).strip() for item in value]
+    else:
+        raise TypeError(
+            "EVALUATION.task_names must be a list of task names or null, "
+            f"got {type(value)}."
+        )
+    if not names or any(not name for name in names):
+        raise ValueError("EVALUATION.task_names must contain non-empty task names.")
+    return list(dict.fromkeys(names))
+
+
+def _resolve_tasks(cfg: DictConfig) -> list[str]:
+    task_name = cfg.EVALUATION.task_name
+    task_names = _normalize_task_list(cfg.EVALUATION.get("task_names"))
+    if task_name is not None and str(task_name).strip() and task_names is not None:
+        raise ValueError(
+            "Set only one of EVALUATION.task_name and EVALUATION.task_names."
+        )
+
+    available_tasks = _load_all_tasks()
+    if task_names is not None:
+        tasks = task_names
+    elif task_name is not None and str(task_name).strip():
+        tasks = [str(task_name).strip()]
+    else:
+        tasks = available_tasks
+
+    unknown = sorted(set(tasks).difference(available_tasks))
+    if unknown:
+        raise ValueError(
+            f"Unknown RoboTwin evaluation tasks: {unknown}. "
+            f"Available tasks: {available_tasks}"
+        )
+    return tasks
+
+
+def _normalize_gpu_ids(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, int)):
+        raw_ids = [value]
+    elif isinstance(value, (list, tuple, ListConfig)):
+        raw_ids = list(value)
+    else:
+        raise TypeError(
+            "MULTIRUN.gpu_ids must be a list of GPU IDs or null, "
+            f"got {type(value)}."
+        )
+    gpu_ids = [str(gpu_id).strip() for gpu_id in raw_ids]
+    if not gpu_ids or any(not gpu_id for gpu_id in gpu_ids):
+        raise ValueError("MULTIRUN.gpu_ids must contain non-empty GPU IDs.")
+    if len(set(gpu_ids)) != len(gpu_ids):
+        raise ValueError(f"MULTIRUN.gpu_ids contains duplicates: {gpu_ids}")
+    return gpu_ids
+
+
+def _resolve_gpu_ids(cfg: DictConfig) -> list[str]:
+    explicit_gpu_ids = _normalize_gpu_ids(cfg.MULTIRUN.get("gpu_ids"))
+    if explicit_gpu_ids is not None:
+        return explicit_gpu_ids
+
+    num_gpus = int(cfg.MULTIRUN.num_gpus)
+    if num_gpus <= 0:
+        raise ValueError("MULTIRUN.num_gpus must be > 0.")
+
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible_devices:
+        visible_gpu_ids = [
+            item.strip() for item in visible_devices.split(",") if item.strip()
+        ]
+        if len(visible_gpu_ids) < num_gpus:
+            raise ValueError(
+                "CUDA_VISIBLE_DEVICES exposes fewer GPUs than MULTIRUN.num_gpus: "
+                f"visible={visible_gpu_ids}, num_gpus={num_gpus}."
+            )
+        return visible_gpu_ids[:num_gpus]
+    return [str(index) for index in range(num_gpus)]
 
 
 def _parse_success_rate(result_file: Path) -> float:
@@ -125,7 +211,7 @@ def _to_jsonable(value: float | None) -> float | None:
 @dataclass
 class RunningState:
     task_name: str
-    gpu_id: int
+    gpu_id: str
     phase: str  # "clean" | "random"
     process: subprocess.Popen[str]
 
@@ -146,13 +232,10 @@ def main(cfg: DictConfig):
     if not robotwin_root.exists():
         raise FileNotFoundError(f"RoboTwin root not found: {robotwin_root}")
 
-    num_gpus = int(cfg.MULTIRUN.num_gpus)
-    if num_gpus <= 0:
-        raise ValueError("`MULTIRUN.num_gpus` must be > 0.")
     max_tasks_per_gpu = int(cfg.MULTIRUN.max_tasks_per_gpu)
     if max_tasks_per_gpu <= 0:
         raise ValueError("`MULTIRUN.max_tasks_per_gpu` must be > 0.")
-    gpu_ids = list(range(num_gpus))
+    gpu_ids = _resolve_gpu_ids(cfg)
 
     output_dir = _resolve_path(str(cfg.EVALUATION.output_dir), base=PROJECT_ROOT)
     run_ts = output_dir.name
@@ -166,11 +249,7 @@ def main(cfg: DictConfig):
     summary_csv = run_output_dir / "summary.csv"
     summary_json = run_output_dir / "summary.json"
 
-    task_name_cfg = cfg.EVALUATION.task_name
-    if task_name_cfg is None or str(task_name_cfg).strip() == "":
-        tasks = _load_all_tasks()
-    else:
-        tasks = [str(task_name_cfg)]
+    tasks = _resolve_tasks(cfg)
 
     extra_overrides = _collect_worker_overrides()
 
@@ -193,7 +272,7 @@ def main(cfg: DictConfig):
             f.write(line + "\n")
             f.flush()
 
-    def build_cmd(*, task_name: str, gpu_id: int, phase: str) -> list[str]:
+    def build_cmd(*, task_name: str, gpu_id: str, phase: str) -> list[str]:
         task_config = phase_to_task_config[phase]
         cmd = [
             sys.executable,
@@ -207,7 +286,7 @@ def main(cfg: DictConfig):
         cmd.extend(extra_overrides)
         return cmd
 
-    def launch_phase(task_name: str, gpu_id: int, phase: str) -> RunningState:
+    def launch_phase(task_name: str, gpu_id: str, phase: str) -> RunningState:
         cmd = build_cmd(task_name=task_name, gpu_id=gpu_id, phase=phase)
         log(
             f"launch task={task_name} phase={phase} gpu={gpu_id} "
@@ -243,7 +322,7 @@ def main(cfg: DictConfig):
                 state.process.kill()
                 state.process.wait()
 
-    def gpu_running_count(gpu_id: int) -> int:
+    def gpu_running_count(gpu_id: str) -> int:
         count = 0
         for state in running_states:
             if state.gpu_id != gpu_id:
@@ -252,7 +331,7 @@ def main(cfg: DictConfig):
                 count += 1
         return count
 
-    def try_launch_pending(gpu_id: int) -> None:
+    def try_launch_pending(gpu_id: str) -> None:
         while len(pending_tasks) > 0 and gpu_running_count(gpu_id) < max_tasks_per_gpu:
             task_name = pending_tasks.popleft()
             running_states.append(launch_phase(task_name=task_name, gpu_id=gpu_id, phase="clean"))

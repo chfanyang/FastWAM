@@ -1973,3 +1973,616 @@ Rothko decode 和 RoboTwin `action_type="ee"`，旧 FastWAM checkpoint 仍走 qp
 - 8 个任务分别进行 RoboTwin 闭环成功率评测；
 - 上下 Rothko 融合方式消融；
 - 后续 Raxel 路径。
+
+## 16. LoRA 微调方案
+
+### 16.1 动机
+
+当前方法已经把机器人动作转换为 Rothko 三通道图像，并与 RGB 一样经过冻结的 Wan
+VAE，最终在同一个 Video DiT latent 空间中建模。相比原始 FastWAM 的独立
+ActionDiT，新的动作表示与预训练视频模态更接近，因此不一定需要更新约 50 亿个
+Video DiT 参数。
+
+LoRA 第一版用于回答：
+
+```text
+原始 Wan2.2 Video DiT 的视觉生成能力是否已经足够，
+只需用少量低秩参数学习 RGB/Rothko 时序布局和机器人任务条件？
+```
+
+预期收益：
+
+- 大幅减少 trainable parameters、gradient 和 optimizer state；
+- 减少过拟合 8 个 RoboTwin 任务的风险；
+- adapter checkpoint 从约 10 GB 降到约 50 MB；
+- 可以保留同一个原始 Wan2.2 base，为不同任务集合分别保存 adapter；
+- 便于比较 full fine-tuning 与 parameter-efficient fine-tuning。
+
+需要明确的限制：
+
+- Wan2.2 的完整冻结参数仍要驻留 GPU，LoRA 不等于量化；
+- VAE encode、10-frame DiT attention 和 activation 显存基本不变；
+- LoRA 主要节省 gradient、optimizer state 和推理 checkpoint；
+- 如果主要 OOM 来自长视频 attention activation，LoRA 不能单独解决；
+- adapter 容量可能不足以同时学习 Rothko 新模态、双条件 attention 和机器人控制。
+
+### 16.2 第一版已选择方案
+
+第一版不引入 Hugging Face PEFT 依赖，而是在仓库中实现独立的 `LoRALinear`：
+
+```text
+y = frozen_linear(x) + scaling * B(A(dropout(x)))
+scaling = alpha / rank
+```
+
+初始化：
+
+```text
+A = Kaiming uniform
+B = zero
+```
+
+因此刚注入尚未训练的 LoRA 输出与原始 Wan2.2 完全一致，不会在 step 0 改变基座
+行为。
+
+默认参数：
+
+```text
+rank = 16
+alpha = 16
+scaling = 1
+dropout = 0
+```
+
+注入范围为 30 个 `DiTBlock` 中 self-attention 和 cross-attention 的全部投影：
+
+```text
+self_attn.q
+self_attn.k
+self_attn.v
+self_attn.o
+cross_attn.q
+cross_attn.k
+cross_attn.v
+cross_attn.o
+```
+
+每层 8 个 Linear，共：
+
+```text
+30 layers x 8 modules = 240 LoRA modules
+```
+
+Wan2.2 当前 attention Linear 都是 `3072 -> 3072`。rank 16 时：
+
+```text
+per module:
+    16 x 3072 + 3072 x 16 = 98,304 parameters
+
+all attention adapters:
+    98,304 x 240 = 23,592,960 parameters
+```
+
+相对于 4,999,849,152 个 DiT 参数，attention LoRA 约占：
+
+```text
+0.472%
+```
+
+此外继续全量训练：
+
+```text
+proprio_encoder: Linear(14, 4096)
+parameters: 14 x 4096 + 4096 = 61,440
+```
+
+保留 proprio encoder 训练的原因是它是当前模型新加入且随机初始化的 qpos token
+映射。如果将其冻结，模型会一直收到未经学习的随机 proprio token。VAE、text
+encoder、原始 Video DiT 参数全部冻结。
+
+### 16.3 为什么第一版只选择 attention
+
+当前新范式相对原始视频预训练的主要变化是：
+
+- latent 时间轴变为 `[RGB block | Rothko block]`；
+- condition latent 从一个变为 `[0,5]` 两个；
+- attention mask 需要同时处理两个条件 block；
+- text/proprio 条件需要影响 Rothko 生成；
+- RGB 与 Rothko future token 需要相互建模。
+
+这些变化首先直接作用在 self-attention 和 cross-attention，因此第一版只对
+`q/k/v/o` 做 LoRA，保持 patch embedding、FFN、time embedding 和 output head
+冻结。这样参数量较小，也最容易判断“只调整 token/condition 交互”是否足够。
+
+### 16.4 Trainer 冻结与 optimizer 规则
+
+全局训练配置新增：
+
+```yaml
+finetune:
+  method: full # full or lora
+  train_proprio_encoder: true
+  lora:
+    rank: 16
+    alpha: 16.0
+    dropout: 0.0
+    target_modules:
+      - self_attn.q
+      - self_attn.k
+      - self_attn.v
+      - self_attn.o
+      - cross_attn.q
+      - cross_attn.k
+      - cross_attn.v
+      - cross_attn.o
+```
+
+`method=full` 是默认值，保持原来的全量 DiT 微调行为。`method=lora` 时：
+
+1. 从原始 Wan2.2 加载完整 Video DiT；
+2. 在 optimizer/DeepSpeed 初始化前注入 LoRA；
+3. 冻结整个模型；
+4. 只重新打开 `lora_A`、`lora_B`；
+5. 根据 `train_proprio_encoder` 打开 proprio encoder；
+6. optimizer 只接收 `requires_grad=True` 的参数；
+7. eval 后恢复 train mode 时再次检查冻结状态，避免意外解冻 base。
+
+Trainer 会输出：
+
+```text
+fine-tuning method
+trainable parameter count
+total parameter count
+trainable ratio
+whether proprio encoder is trainable
+```
+
+### 16.5 LoRA checkpoint 设计
+
+全量微调保持原来的 checkpoint：
+
+```text
+checkpoint_type = full
+dit = complete Video DiT state_dict
+proprio_encoder = complete proprio state_dict
+visual_action_config
+```
+
+LoRA 推理权重改为 adapter-only：
+
+```text
+checkpoint_type = lora_adapter
+lora = only all lora_A/lora_B tensors
+proprio_encoder = complete proprio state_dict
+fine_tuning:
+    method = lora
+    base_model_id = Wan-AI/Wan2.2-TI2V-5B
+    rank / alpha / dropout / target_modules
+    module_count / parameter_count
+    train_proprio_encoder
+visual_action_config:
+    Rothko codec parameters
+    action_horizon
+    latent layout
+    temporal RoPE mode
+    condition latent indices
+```
+
+加载 LoRA checkpoint 时：
+
+1. 正常从 `base_model_id` 对应的原始 Wan2.2 权重构建 Video DiT；
+2. 校验当前 base model ID 与 checkpoint；
+3. 根据 checkpoint 中的 LoRA config 自动注入 adapter；
+4. 严格检查全部 A/B key 和 tensor shape；
+5. 加载 proprio encoder；
+6. 校验 Rothko/horizon/latent/RoPE 元信息；
+7. 不要求评测配置预先显式注入 LoRA。
+
+推理 adapter 的预计大小：
+
+```text
+23,592,960 BF16 LoRA parameters x 2 bytes
+approximately 47.2 MB
+plus proprio encoder and torch serialization metadata
+```
+
+真实 DeepSpeed 保存结果为：
+
+```text
+47,460,187 bytes
+approximately 46 MiB as reported by ls -lh
+```
+
+注意：`checkpoints/weights/step_xxxxxx.pt` 会显著缩小，但
+`checkpoints/state/step_xxxxxx` 是 Accelerate/DeepSpeed 的完整训练恢复状态，仍
+可能包含冻结 base 的模型 state，因此不会缩小到只有几十 MB。训练恢复目录与可移植
+推理 adapter 是两个不同用途的产物。
+
+### 16.6 Base checkpoint 边界
+
+第一版 adapter-only LoRA 明确绑定：
+
+```text
+Wan-AI/Wan2.2-TI2V-5B original base
+```
+
+不能直接把第 15 节的 100-step full-finetuned checkpoint 当作 LoRA base，然后只
+保存 adapter。否则 adapter 会隐式依赖那份约 10 GB 的 full checkpoint，单独复制
+adapter 到其他机器时无法复现。
+
+因此第一版行为是：
+
+- LoRA 从配置中的原始 Wan2.2 base 开始；
+- `.pt` 权重恢复只接受 LoRA adapter checkpoint；
+- 完整训练恢复只接受相同 LoRA 架构保存的 DeepSpeed state directory；
+- 尝试把 full-finetuned `.pt` 加载进 LoRA run 时直接报错。
+
+后续若确实希望在 full checkpoint 上继续 LoRA，有三种备选实现：
+
+1. adapter checkpoint 显式记录并依赖 full base checkpoint 的内容哈希和路径；
+2. 发布时把 full base 与 LoRA merge，导出新的约 10 GB 完整 DiT；
+3. 计算 full checkpoint 相对原始 Wan 的 delta，与 LoRA 一起保存。
+
+第一版选择原始 Wan base，以保证 adapter 独立、可移植和实验定义清晰。
+
+### 16.7 8 任务 LoRA 配置
+
+新增任务配置：
+
+```text
+configs/task/robotwin_video_only_rothko_3cam_384_lora_1e-4.yaml
+```
+
+它使用与第 15 节 full fine-tuning 完全相同的 8 个任务、数据、Rothko stats、语言
+embedding 和 scheduler。正式 LoRA 配置利用较小的 optimizer/gradient 显存，将
+per-GPU batch 从 full smoke test 的 1 提高到 32，并改变：
+
+```text
+finetune.method = lora
+LoRA rank/alpha/dropout/targets
+per-GPU batch size = 32
+num_workers = 2
+max_steps = 30,000
+eval_every = 500
+save_every = 2,000
+wandb.enabled = true
+wandb.project = fast-wam
+wandb.group = robotwin_video_only_rothko_8task_lora_r32
+```
+
+使用两张 GPU 时：
+
+```text
+micro global batch = 32 x 2 = 64
+effective global batch = 64
+```
+
+使用四张 GPU 时：
+
+```text
+micro global batch = 32 x 4 = 128
+effective global batch = 128
+```
+
+当前 `gradient_accumulation_steps=1`。实际双卡 rank-32、per-GPU batch 4 运行时，
+每张 80 GB GPU 仅占用约 15.3 GB，因此正式配置进一步提高到 per-GPU batch 32。
+第一次使用 `batch_size=32, num_workers=8` 时在首批数据的 pin-memory 阶段触发
+`CUDA error: invalid argument`，尚未进入模型 forward；因此保留 batch 32，将
+`num_workers` 降到 2 以减少双进程预取和共享/pinned memory 并发。LoRA 会显著减少
+gradient 和 optimizer state，但不会消除 10-frame Video DiT activation；首次成功
+进入 forward 后仍需观察峰值显存，若 OOM 再降低 batch。
+
+双卡短程 smoke training：
+
+```bash
+conda activate fastwam
+CUDA_VISIBLE_DEVICES=6,7 \
+MASTER_PORT=29543 \
+DIFFSYNTH_MODEL_BASE_PATH=/mnt/hwdata/cfy/FastWAM/checkpoints \
+bash scripts/train_zero1.sh 2 \
+  task=robotwin_video_only_rothko_3cam_384_lora_1e-4 \
+  max_steps=10 \
+  batch_size=1 \
+  eval_every=0 \
+  save_every=10 \
+  log_every=1
+```
+
+上面的 smoke 命令显式覆盖 `batch_size=1`，用于排查功能；正式配置默认
+`batch_size=32`、`max_steps=30000`。双卡训练时共访问约 192 万个样本，相当于
+当前 1,268,383 个训练窗口约 1.51 epoch。
+
+正式双卡训练：
+
+```bash
+conda activate fastwam
+CUDA_VISIBLE_DEVICES=6,7 \
+MASTER_PORT=29543 \
+DIFFSYNTH_MODEL_BASE_PATH=/mnt/hwdata/cfy/FastWAM/checkpoints \
+bash scripts/train_zero1.sh 2 \
+  task=robotwin_video_only_rothko_3cam_384_lora_1e-4
+```
+
+四卡训练：
+
+```bash
+conda activate fastwam
+CUDA_VISIBLE_DEVICES=4,5,6,7 \
+MASTER_PORT=29543 \
+DIFFSYNTH_MODEL_BASE_PATH=/mnt/hwdata/cfy/FastWAM/checkpoints \
+bash scripts/train_zero1.sh 4 \
+  task=robotwin_video_only_rothko_3cam_384_lora_1e-4
+```
+
+评测 adapter checkpoint：
+
+```bash
+conda activate fastwam_robotwin
+DIFFSYNTH_MODEL_BASE_PATH=/mnt/hwdata/cfy/FastWAM/checkpoints \
+python experiments/robotwin/eval_robotwin_single.py \
+  task=robotwin_video_only_rothko_3cam_384_lora_1e-4 \
+  ckpt=/absolute/path/to/weights/step_xxxxxx.pt \
+  EVALUATION.task_name=click_alarmclock \
+  EVALUATION.dataset_stats_path=/mnt/hwdata/cfy/FastWAM/data/robotwin2.0/dataset_stats.json \
+  gpu_id=4
+```
+
+single 会把 task config 中的 `finetune.method` 显式传给 RoboTwin policy。LoRA
+checkpoint 会先加载原始 `Wan-AI/Wan2.2-TI2V-5B`，再加载 adapter；full
+checkpoint 仍可跳过原始 DiT 加载。Rothko normalization stats 会相对 FastWAM
+项目根目录解析为绝对路径，不再受 RoboTwin 子进程工作目录影响。
+
+manager 现在支持任务列表与非连续物理 GPU ID。四任务、四卡完整评测（每个任务依次
+执行 `demo_clean` 和 `demo_randomized`）：
+
+```bash
+conda activate fastwam_robotwin
+DIFFSYNTH_MODEL_BASE_PATH=/mnt/hwdata/cfy/FastWAM/checkpoints \
+python experiments/robotwin/run_robotwin_manager.py \
+  task=robotwin_video_only_rothko_3cam_384_lora_1e-4 \
+  ckpt=/absolute/path/to/weights/step_xxxxxx.pt \
+  'EVALUATION.task_names=[stack_bowls_three,place_shoe,click_alarmclock,blocks_ranking_rgb]' \
+  EVALUATION.dataset_stats_path=/mnt/hwdata/cfy/FastWAM/data/robotwin2.0/dataset_stats.json \
+  'MULTIRUN.gpu_ids=[2,3,6,7]' \
+  MULTIRUN.max_tasks_per_gpu=1
+```
+
+设置了 `MULTIRUN.gpu_ids` 时会直接使用这些物理 GPU；未设置时，如果外部存在
+`CUDA_VISIBLE_DEVICES`，manager 会从其中选择前 `MULTIRUN.num_gpus` 个设备，
+否则保持原有的 `0..num_gpus-1` 行为。
+
+### 16.8 第一轮对比指标
+
+LoRA 不能只比较训练 loss。与 full fine-tuning 应至少比较：
+
+```text
+trainable parameter count
+peak allocated/reserved GPU memory
+optimizer checkpoint size
+portable weights checkpoint size
+steps/s and samples/s
+RGB latent loss
+Rothko latent loss
+validation loss
+RGB PSNR/SSIM
+Rothko PSNR/SSIM
+decoded EE position/rotation/gripper error
+8-task RoboTwin closed-loop success rate
+```
+
+公平对比要求：
+
+- 相同 8 个任务和 episode；
+- 相同 seed；
+- 相同 global batch；
+- 相同训练 step；
+- 相同 LR scheduler；
+- 相同 diffusion timestep sampling；
+- 相同 checkpoint/evaluation step；
+- 分别报告 RGB 和 Rothko，不只报告 total loss。
+
+第一轮建议先做：
+
+1. 1--10 step smoke test，验证梯度、保存和加载；
+2. 单 sample 或单 episode overfit，判断 rank 16 是否有足够容量；
+3. 与 full fine-tuning 相同的 100-step run；
+4. 比较两者 loss、显存、速度和 checkpoint；
+5. 只有短程行为正常后再跑正式 8 任务训练。
+
+### 16.9 保留的 LoRA 备选方案
+
+如果 attention-only rank 16 容量不足，按以下顺序增加能力：
+
+1. `rank=32`，保持 attention-only；
+2. 在 attention LoRA 之外训练每层 `modulation`；
+3. 将 `ffn.0` 和 `ffn.2` 加入 LoRA；
+4. 解冻 output head；
+5. 解冻 patch embedding；
+6. attention + FFN 全部 Linear LoRA；
+7. 使用不同 LR：LoRA 较高、proprio encoder 较低；
+8. 为 RGB/Rothko 增加 modality embedding；
+9. 使用 DoRA 或其他 adapter；
+10. 改用 PEFT，以换取标准生态的 merge/export 功能。
+
+不建议第一轮直接对所有 Linear 做 LoRA，因为这样无法判断收益究竟来自 attention
+布局适配还是 FFN/输入输出映射，同时会增加约 1,671 万个 FFN LoRA 参数。
+
+如果 attention-only 的 RGB loss 正常而 Rothko loss 明显落后，优先尝试：
+
+```text
+output head / FFN / patch embedding adaptation
+```
+
+因为这更可能说明问题出在新视觉分布的输入输出映射，而不是 token attention。
+
+如果两个 loss 都难以下降，优先尝试：
+
+```text
+rank 32
+attention + FFN LoRA
+full fine-tuning baseline
+```
+
+如果训练 loss 很低但闭环控制失败，应优先检查 codec、VAE reconstruction、时序误差
+累积和 EE decode，而不是继续增加 LoRA rank。
+
+### 16.10 当前实现与验证状态
+
+已完成：
+
+- 内置 `LoRALinear`，无新增第三方依赖；
+- suffix-based target module 注入与严格 target 检查；
+- base 参数冻结与 adapter-only trainable 标记；
+- trainer 的 `full/lora` 双模式；
+- proprio encoder 独立训练开关；
+- adapter-only save/load；
+- base model ID、LoRA config 和 Rothko config 校验；
+- 旧 full checkpoint 保存/加载保持兼容；
+- 8 任务 LoRA Hydra 配置；
+- 小模型初始输出一致性测试；
+- adapter state 保存/加载一致性测试；
+- 30 层结构 target 匹配测试；
+- 真实 Wan2.2 5B 模型构建；
+- 双卡真实 batch forward/backward；
+- 双卡 1-step 和 2-step LoRA smoke training；
+- adapter checkpoint CPU load；
+- 干净 5B base 自动注入并加载 adapter。
+
+30 层结构测试结果：
+
+```text
+matched LoRA modules = 240
+expected Wan 5B adapter parameters = 23,592,960
+first module = blocks.0.self_attn.q
+last module = blocks.29.cross_attn.o
+status = PASS
+```
+
+真实双卡 LoRA 验证使用物理 GPU 6、7，GPU 4、5 当时被其他用户占用。2-step
+运行目录：
+
+```text
+runs/robotwin_video_only_rothko_3cam_384_lora_1e-4/2026-07-24_12-41-47
+```
+
+关键初始化结果：
+
+```text
+LoRA modules = 240
+LoRA parameters = 23,592,960
+LoRA + proprio trainable parameters = 23,654,400
+all model parameters including frozen VAE etc. = 5,728,130,780
+trainable ratio over complete model = 0.412951%
+
+ZeRO-1 after optimizer initialization:
+memory allocated = approximately 10.73 GB
+memory cached = approximately 10.83 GB
+```
+
+2-step loss：
+
+```text
+step 1:
+    total = 0.7288
+    RGB = 0.5333
+    Rothko = 0.1955
+
+step 2:
+    total = 0.6178
+    RGB = 0.4349
+    Rothko = 0.1829
+```
+
+这两步只能证明 forward/backward 和 optimizer 正常，不能用来判断收敛趋势。随机
+sample 和 diffusion timestep 会让极短程 loss 与第 15 节 full run 的 step 100
+不可直接比较。
+
+第一次真实 DeepSpeed adapter 保存暴露了一个 storage 问题：DeepSpeed 参数是 flat
+buffer 的 view，直接 `.cpu()` 会把较大的 backing storage 一起保存，使文件达到：
+
+```text
+94,645,977 bytes
+```
+
+修复方式是在提取每个 A/B 和 proprio tensor 时强制 `.cpu().clone()`，得到紧凑且
+独立的 CPU storage。修复后重新执行 1-step 验证：
+
+```text
+run:
+    runs/robotwin_video_only_rothko_3cam_384_lora_1e-4/2026-07-24_12-47-52
+
+portable adapter:
+    checkpoints/weights/step_000001.pt
+    47,460,187 bytes
+    480 A/B tensors
+    23,592,960 BF16 adapter parameters
+    CPU torch.load = PASS
+```
+
+LoRA DeepSpeed 恢复状态：
+
+```text
+rank-0 optimizer shard = 141,949,701 bytes
+rank-1 optimizer shard = 141,949,893 bytes
+model state = 11,457,064,189 bytes
+entire 1-step run = approximately 11 GB
+```
+
+相比第 15 节 full fine-tuning：
+
+```text
+full optimizer shard per rank = approximately 30 GB
+LoRA optimizer shard per rank = approximately 142 MB
+
+full portable weights = approximately 10 GB
+LoRA portable adapter = approximately 47.5 MB
+```
+
+DeepSpeed model state 仍包含冻结 base，所以 LoRA 的恢复目录仍约 11 GB；这是正常
+现象。
+
+最后在新进程中只使用 GPU 6：
+
+1. 从原始 Wan2.2 权重重新构建干净的 5B base；
+2. 读取 47,460,187-byte adapter；
+3. 根据 checkpoint 元信息自动注入 240 个 LoRA module；
+4. 严格加载 480 个 A/B tensor；
+5. 逐值比较首个 `blocks.0.self_attn.q` 的 A/B；
+6. 检查 module/parameter count。
+
+结果：
+
+```text
+checkpoint_type = lora_adapter
+step = 1
+modules = 240
+adapter_parameters = 23,592,960
+device = cuda:0 (physical GPU 6 under CUDA_VISIBLE_DEVICES)
+status = LOAD_PASS
+```
+
+并检查了 1-step checkpoint 中从全零初始化的 `lora_B`：
+
+```text
+B tensors with nonzero updates = 240 / 240
+nonzero B elements = 11,789,560 / 11,796,480
+global B L2 norm = 0.339443
+status = UPDATE_PASS
+```
+
+这说明所有 240 个目标模块都实际收到了梯度并完成了 optimizer update，不只是完成了
+冻结 base 的前向。
+
+当前没有 OOM、NaN 或 Inf。`num_workers=2` 的 2-step run 退出时仍出现 NFS
+multiprocessing 临时目录 warning；`num_workers=0` 的 1-step run 没有该 NFS
+warning，只剩未显式 `destroy_process_group()` 的退出 warning，两个主命令返回码
+均为 0。
+
+仍需完成：
+
+- 双卡 10-step LoRA smoke training；
+- full 与 LoRA 的同 seed、同 sample、同 100-step 对比；
+- adapter checkpoint 通过完整 RoboTwin policy 初始化；
+- 单 episode overfit；
+- 8 任务正式训练；
+- RoboTwin 闭环评测。

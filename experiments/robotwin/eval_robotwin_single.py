@@ -11,7 +11,7 @@ Features:
 Common arguments:
 - `ckpt`: path to the FastWAM checkpoint (required).
 - `EVALUATION.task_name`: task name to evaluate (required).
-- `gpu_id`: sets `CUDA_VISIBLE_DEVICES`.
+- `gpu_id`: physical GPU ID used to set `CUDA_VISIBLE_DEVICES`.
 
 Examples:
 1) Minimal run
@@ -196,6 +196,12 @@ def main(cfg: DictConfig):
     sim_task = HydraConfig.get().runtime.choices.get("task")
 
     dataset_stats_path = _resolve_dataset_stats_path(cfg, ckpt_path)
+    finetune_method = str(cfg.finetune.method).strip().lower()
+    if finetune_method not in {"full", "lora"}:
+        raise ValueError(
+            f"Unsupported finetune.method={finetune_method!r}. "
+            "Expected one of: ['full', 'lora']."
+        )
 
     overrides: list[str] = []
     _append_override(overrides, "task_name", cfg.EVALUATION.task_name)
@@ -208,6 +214,7 @@ def main(cfg: DictConfig):
 
     _append_override(overrides, "sim_cfg_path", str(sim_cfg_path))
     _append_override(overrides, "sim_task", sim_task)
+    _append_override(overrides, "finetune_method", finetune_method)
     _append_override(overrides, "eval_output_dir", str(robotwin_eval_base))
     _append_override(overrides, "mixed_precision", cfg.mixed_precision)
     _append_override(overrides, "device", cfg.EVALUATION.device)
@@ -221,6 +228,11 @@ def main(cfg: DictConfig):
     _append_override(overrides, "rand_device", cfg.EVALUATION.rand_device)
     _append_override(overrides, "tiled", cfg.EVALUATION.tiled)
     _append_override(overrides, "timing_enabled", cfg.EVALUATION.timing_enabled)
+    _append_override(
+        overrides,
+        "save_prediction_videos",
+        cfg.EVALUATION.save_prediction_videos,
+    )
     _append_override(
         overrides,
         "skip_get_obs_within_replan",

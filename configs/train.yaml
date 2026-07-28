@@ -31,6 +31,24 @@ max_grad_norm: 1.0
 weight_decay: 0.0
 resume: null
 
+# parameter-efficient fine-tuning
+finetune:
+  method: full # one of: [full, lora]
+  train_proprio_encoder: true
+  lora:
+    rank: 16
+    alpha: 16.0
+    dropout: 0.0
+    target_modules:
+      - self_attn.q
+      - self_attn.k
+      - self_attn.v
+      - self_attn.o
+      - cross_attn.q
+      - cross_attn.k
+      - cross_attn.v
+      - cross_attn.o
+
 # wandb
 wandb:
   enabled: false

@@ -26,6 +26,7 @@ if str(SRC_ROOT) not in sys.path:
 from fastwam.datasets.lerobot.processors.fastwam_processor import FastWAMProcessor
 from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
 from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
+from fastwam.utils.video_io import save_mp4
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,46 @@ def _mixed_precision_to_model_dtype(mixed_precision: str) -> torch.dtype:
     if precision == "fp16":
         return torch.float16
     return torch.bfloat16
+
+
+def _prepare_model_cfg(
+    model_cfg: DictConfig,
+    *,
+    finetune_method: str,
+) -> DictConfig:
+    method = str(finetune_method).strip().lower()
+    if method not in {"full", "lora"}:
+        raise ValueError(
+            f"Unsupported finetune_method={finetune_method!r}. "
+            "Expected one of: ['full', 'lora']."
+        )
+
+    model_cfg_copy = OmegaConf.create(
+        OmegaConf.to_container(model_cfg, resolve=True)
+    )
+    model_cfg_copy.load_text_encoder = True
+
+    # Full checkpoints contain the complete DiT and may skip the pretrained
+    # backbone load. Adapter-only LoRA checkpoints must be applied on top of
+    # the original Wan backbone.
+    if method == "lora":
+        model_cfg_copy.skip_dit_load_from_pretrain = False
+
+    rothko_stats = model_cfg_copy.get("rothko_norm_stats")
+    if not _is_none_like(rothko_stats):
+        stats_path = Path(
+            os.path.expandvars(os.path.expanduser(str(rothko_stats)))
+        )
+        if not stats_path.is_absolute():
+            stats_path = PROJECT_ROOT / stats_path
+        stats_path = stats_path.resolve()
+        if not stats_path.exists():
+            raise FileNotFoundError(
+                f"Rothko normalization stats not found: {stats_path}"
+            )
+        model_cfg_copy.rothko_norm_stats = str(stats_path)
+
+    return model_cfg_copy
 
 
 def _resolve_sim_cfg_name(sim_cfg_path: Optional[str], sim_cfg_name: Optional[str]) -> str:
@@ -144,6 +185,7 @@ class WorldActionRobotWinPolicy:
         dataset_stats_path: Path,
         device: str,
         model_dtype: torch.dtype,
+        finetune_method: str,
         action_horizon: int,
         replan_steps: int,
         num_inference_steps: int,
@@ -155,9 +197,13 @@ class WorldActionRobotWinPolicy:
         tiled: bool,
         timing_enabled: bool,
         num_video_frames: int,
+        save_prediction_videos: bool,
+        prediction_output_dir: Optional[Path],
     ) -> None:
-        model_cfg_copy = OmegaConf.create(OmegaConf.to_container(model_cfg, resolve=True))
-        model_cfg_copy.load_text_encoder = True
+        model_cfg_copy = _prepare_model_cfg(
+            model_cfg,
+            finetune_method=finetune_method,
+        )
 
         self.model = instantiate(model_cfg_copy, model_dtype=model_dtype, device=device)
         self.model.load_checkpoint(checkpoint_path)
@@ -182,20 +228,45 @@ class WorldActionRobotWinPolicy:
         self.tiled = bool(tiled)
         self.timing_enabled = bool(timing_enabled)
         self._num_video_frames = int(num_video_frames)
+        self.save_prediction_videos = bool(save_prediction_videos)
+        self.prediction_output_dir = (
+            None
+            if prediction_output_dir is None
+            else Path(prediction_output_dir).expanduser().resolve()
+        )
+        if self.save_prediction_videos:
+            if not self.is_visual_action_model:
+                logger.warning(
+                    "Prediction-video saving is only supported by the visual-action "
+                    "model; disabling it for this checkpoint."
+                )
+                self.save_prediction_videos = False
+            elif self.prediction_output_dir is None:
+                raise ValueError(
+                    "`prediction_output_dir` is required when "
+                    "`save_prediction_videos=True`."
+                )
+            else:
+                self.prediction_output_dir.mkdir(parents=True, exist_ok=True)
 
         self.pending_actions: deque[np.ndarray] = deque()
         self.episode_count = 0
+        self.replan_count = 0
         self.step_count = 0
         self._timing_rollout = {"infer_s": 0.0, "sim_s": 0.0}
 
         logger.info(
             "Initialized WorldActionRobotWinPolicy | ckpt=%s | stats=%s | "
-            "horizon=%d | replan=%d | action_type=%s",
+            "finetune=%s | horizon=%d | replan=%d | action_type=%s | "
+            "save_prediction_videos=%s | prediction_output_dir=%s",
             checkpoint_path,
             dataset_stats_path,
+            finetune_method,
             self.action_horizon,
             self.replan_steps,
             self.action_type,
+            self.save_prediction_videos,
+            self.prediction_output_dir,
         )
 
     def _normalize_state(self, state: np.ndarray) -> torch.Tensor:
@@ -272,9 +343,76 @@ class WorldActionRobotWinPolicy:
             ),
             current_endpose.to(
                 device=self.model.device,
-                dtype=self.model.torch_dtype,
+                dtype=torch.float32,
             ),
         )
+
+    @staticmethod
+    def _normalized_video_to_pil(video: torch.Tensor) -> list[Image.Image]:
+        if video.ndim == 5:
+            if video.shape[0] != 1:
+                raise ValueError(
+                    "Prediction-video saving expects batch size 1, got "
+                    f"{tuple(video.shape)}."
+                )
+            video = video[0]
+        if video.ndim != 4 or video.shape[0] != 3:
+            raise ValueError(
+                "Prediction video must be [1,3,T,H,W] or [3,T,H,W], got "
+                f"{tuple(video.shape)}."
+            )
+        uint8 = (
+            (video.detach().float().cpu().clamp(-1.0, 1.0) + 1.0)
+            * 127.5
+        ).round().to(torch.uint8)
+        return [
+            Image.fromarray(
+                uint8[:, frame_index].permute(1, 2, 0).contiguous().numpy(),
+                mode="RGB",
+            )
+            for frame_index in range(uint8.shape[1])
+        ]
+
+    def _save_visual_prediction(self, prediction: Dict[str, Any]) -> None:
+        if not self.save_prediction_videos:
+            return
+        if self.prediction_output_dir is None:
+            raise RuntimeError("Prediction output directory is not initialized.")
+
+        episode_index = max(self.episode_count - 1, 0)
+        episode_dir = (
+            self.prediction_output_dir / f"episode_{episode_index:03d}"
+        )
+        stem = (
+            f"replan_{self.replan_count:03d}"
+            f"_env_step_{self.step_count:04d}"
+        )
+
+        rgb_frames = prediction.get("video")
+        if not isinstance(rgb_frames, (list, tuple)) or not rgb_frames:
+            raise ValueError(
+                "Visual-action prediction is missing a non-empty `video` frame list."
+            )
+        if not all(isinstance(frame, Image.Image) for frame in rgb_frames):
+            raise TypeError("Every predicted RGB frame must be a PIL image.")
+
+        raymap = prediction.get("raymap")
+        if not isinstance(raymap, torch.Tensor):
+            raise ValueError(
+                "Visual-action prediction is missing tensor `raymap`."
+            )
+        raymap_frames = self._normalized_video_to_pil(raymap)
+
+        rgb_path = episode_dir / f"{stem}_rgb.mp4"
+        raymap_path = episode_dir / f"{stem}_raymap.mp4"
+        save_mp4(rgb_frames, str(rgb_path), fps=10)
+        save_mp4(raymap_frames, str(raymap_path), fps=10)
+        logger.info(
+            "Saved predicted RGB/Rothko videos: %s | %s",
+            rgb_path,
+            raymap_path,
+        )
+        self.replan_count += 1
 
     def _infer_action_chunk(
         self,
@@ -306,6 +444,7 @@ class WorldActionRobotWinPolicy:
                 )
             if self.timing_enabled:
                 self._timing_rollout["infer_s"] += time.perf_counter() - infer_t0
+            self._save_visual_prediction(pred)
             action_tensor = pred.get("action")
             if not isinstance(action_tensor, torch.Tensor):
                 raise ValueError(
@@ -407,6 +546,7 @@ class WorldActionRobotWinPolicy:
     def reset(self) -> None:
         self.pending_actions.clear()
         self.episode_count += 1
+        self.replan_count = 0
         self.step_count = 0
         self.reset_timing_rollout()
 
@@ -436,6 +576,15 @@ def get_model(usr_args: Dict[str, Any]):
 
     mixed_precision = str(usr_args.get("mixed_precision") or cfg.get("mixed_precision", "bf16"))
     model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
+    finetune_method = str(
+        usr_args.get("finetune_method")
+        or cfg.get("finetune", {}).get("method", "full")
+    ).strip().lower()
+    if finetune_method not in {"full", "lora"}:
+        raise ValueError(
+            f"Unsupported finetune_method={finetune_method!r}. "
+            "Expected one of: ['full', 'lora']."
+        )
 
     dataset_stats_path = _resolve_dataset_stats_path(
         dataset_stats_path=usr_args.get("dataset_stats_path"),
@@ -468,6 +617,27 @@ def get_model(usr_args: Dict[str, Any]):
     timing_enabled = _parse_bool(
         usr_args.get("timing_enabled", cfg.EVALUATION.get("timing_enabled", False))
     )
+    save_prediction_videos = _parse_bool(
+        usr_args.get(
+            "save_prediction_videos",
+            cfg.EVALUATION.get("save_prediction_videos", False),
+        )
+    )
+    prediction_output_dir = None
+    if save_prediction_videos:
+        eval_output_dir = usr_args.get("eval_output_dir")
+        if _is_none_like(eval_output_dir):
+            raise ValueError(
+                "`eval_output_dir` is required when saving prediction videos."
+            )
+        task_config = str(usr_args.get("task_config") or "unknown")
+        if Path(task_config).name != task_config:
+            raise ValueError(f"Invalid task_config path component: {task_config!r}")
+        prediction_output_dir = (
+            Path(str(eval_output_dir)).expanduser().resolve()
+            / "predictions"
+            / task_config
+        )
 
     policy = WorldActionRobotWinPolicy(
         model_cfg=cfg.model,
@@ -476,6 +646,7 @@ def get_model(usr_args: Dict[str, Any]):
         dataset_stats_path=dataset_stats_path,
         device=device,
         model_dtype=model_dtype,
+        finetune_method=finetune_method,
         action_horizon=action_horizon,
         replan_steps=replan_steps,
         num_inference_steps=num_inference_steps,
@@ -487,6 +658,8 @@ def get_model(usr_args: Dict[str, Any]):
         tiled=tiled,
         timing_enabled=timing_enabled,
         num_video_frames=(int(cfg.data.train.num_frames) - 1) // int(cfg.data.train.action_video_freq_ratio) + 1,
+        save_prediction_videos=save_prediction_videos,
+        prediction_output_dir=prediction_output_dir,
     )
     return policy
 

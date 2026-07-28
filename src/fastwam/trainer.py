@@ -10,11 +10,12 @@ import time
 import numpy as np
 import torch
 from accelerate import Accelerator
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 
+from .models.lora import LoRAConfig, mark_only_lora_trainable
 from .utils.fs import ensure_dir
 from .utils.logging_config import get_logger, setup_logging
 from .utils.pytorch_utils import set_global_seed
@@ -46,6 +47,34 @@ class Wan22Trainer:
         self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
         self.max_grad_norm = float(cfg.max_grad_norm)
         self.seed = int(cfg.seed)
+        finetune_cfg = cfg.get("finetune")
+        if isinstance(finetune_cfg, DictConfig):
+            finetune_cfg = OmegaConf.to_container(finetune_cfg, resolve=True)
+        if finetune_cfg is None:
+            finetune_cfg = {}
+        if not isinstance(finetune_cfg, dict):
+            raise ValueError(
+                f"`finetune` must be dict-like, got {type(finetune_cfg)}."
+            )
+        self.finetune_method = str(
+            finetune_cfg.get("method", "full")
+        ).strip().lower()
+        if self.finetune_method not in {"full", "lora"}:
+            raise ValueError(
+                f"Unsupported finetune.method={self.finetune_method!r}; "
+                "expected `full` or `lora`."
+            )
+        self.train_proprio_encoder = bool(
+            finetune_cfg.get("train_proprio_encoder", True)
+        )
+        lora_cfg = finetune_cfg.get("lora")
+        if isinstance(lora_cfg, DictConfig):
+            lora_cfg = OmegaConf.to_container(lora_cfg, resolve=True)
+        self.lora_config = (
+            LoRAConfig.from_dict(lora_cfg)
+            if self.finetune_method == "lora"
+            else None
+        )
         
         self.resume = cfg.resume
         self.mixed_precision = str(cfg.mixed_precision).strip().lower()
@@ -82,10 +111,26 @@ class Wan22Trainer:
         # Freeze non-trainable modules before optimizer/deepspeed initialization.
         # This keeps DiT (+ optional proprio encoder) as trainable when ZeRO builds optimizer state.
         self._apply_dit_only_train_mode(self.model)
-        trainable_params = list(self.model.dit.parameters())
-        proprio_encoder = getattr(self.model, "proprio_encoder", None)
-        if proprio_encoder is not None:
-            trainable_params.extend(list(proprio_encoder.parameters()))
+        trainable_params = [
+            parameter
+            for parameter in self.model.parameters()
+            if parameter.requires_grad
+        ]
+        if not trainable_params:
+            raise ValueError(
+                f"No trainable parameters for finetune.method={self.finetune_method!r}."
+            )
+        trainable_count = sum(parameter.numel() for parameter in trainable_params)
+        total_count = sum(parameter.numel() for parameter in self.model.parameters())
+        logger.info(
+            "Fine-tuning mode=%s trainable_parameters=%d total_parameters=%d "
+            "trainable_ratio=%.6f%% train_proprio_encoder=%s",
+            self.finetune_method,
+            trainable_count,
+            total_count,
+            100.0 * trainable_count / max(total_count, 1),
+            self.train_proprio_encoder,
+        )
         self.optimizer = torch.optim.AdamW(
             trainable_params,
             lr=self.learning_rate,
@@ -278,19 +323,33 @@ class Wan22Trainer:
         logger.warning("Loaded .pt weights only; optimizer/scheduler/step were not restored under ZeRO2.")
 
     def _set_dit_only_train_mode(self):
-        # Match DiffSynth's freeze_except("dit"): only DiT stays trainable/in-train-mode.
-        logger.info("Setting DiT to train mode and freezing other model components.")
+        logger.info(
+            "Restoring fine-tuning train mode: method=%s.",
+            self.finetune_method,
+        )
         model = self.accelerator.unwrap_model(self.model)
         self._apply_dit_only_train_mode(model)
 
-    @staticmethod
-    def _apply_dit_only_train_mode(model):
+    def _apply_dit_only_train_mode(self, model):
         model.eval()
+        if self.finetune_method == "lora":
+            enable_lora = getattr(model, "enable_lora", None)
+            if not callable(enable_lora):
+                raise TypeError(
+                    f"Model {type(model).__name__} does not support LoRA fine-tuning."
+                )
+            enable_lora(
+                self.lora_config,
+                train_proprio_encoder=self.train_proprio_encoder,
+            )
         model.requires_grad_(False)
         model.dit.train()
-        model.dit.requires_grad_(True)
+        if self.finetune_method == "full":
+            model.dit.requires_grad_(True)
+        else:
+            mark_only_lora_trainable(model.dit)
         proprio_encoder = getattr(model, "proprio_encoder", None)
-        if proprio_encoder is not None:
+        if proprio_encoder is not None and self.train_proprio_encoder:
             proprio_encoder.train()
             proprio_encoder.requires_grad_(True)
 

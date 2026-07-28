@@ -541,6 +541,64 @@ class WanVideoDiT(torch.nn.Module):
             mask[condition_to_condition] = True
             return mask
 
+        if self.video_attention_mask_mode == "rgb_then_raymap_block_causal":
+            if video_seq_len % video_tokens_per_frame != 0:
+                raise ValueError(
+                    "`video_seq_len` must be divisible by `video_tokens_per_frame` in "
+                    "rgb_then_raymap_block_causal mode."
+                )
+            if not condition_frame_indices:
+                raise ValueError(
+                    "rgb_then_raymap_block_causal mode requires "
+                    "`condition_frame_indices=[rgb_condition, raymap_condition]`."
+                )
+            num_frames = video_seq_len // video_tokens_per_frame
+            condition_indices = sorted(
+                set(int(index) for index in condition_frame_indices)
+            )
+            if len(condition_indices) != 2:
+                raise ValueError(
+                    "rgb_then_raymap_block_causal mode requires exactly two "
+                    f"condition frames, got {condition_indices}."
+                )
+            rgb_condition_index, raymap_condition_index = condition_indices
+            if rgb_condition_index != 0:
+                raise ValueError(
+                    "rgb_then_raymap_block_causal mode requires the RGB condition "
+                    f"at frame 0, got {rgb_condition_index}."
+                )
+            if num_frames != 2 * raymap_condition_index:
+                raise ValueError(
+                    "rgb_then_raymap_block_causal mode expects paired, equally sized "
+                    "[RGB | Raymap] frame blocks with the Raymap condition at the "
+                    f"start of the second block, got num_frames={num_frames} and "
+                    f"raymap_condition_index={raymap_condition_index}."
+                )
+
+            # Frame layout: [RGB_0..RGB_N | RAY_0..RAY_N].
+            #
+            # - The two clean condition queries only see each other.
+            # - Future RGB queries see the complete RGB block and current RAY_0,
+            #   but never the noisy future Raymap block.
+            # - Future Raymap queries see both complete blocks, so Raymap/action
+            #   prediction can use the jointly denoised future RGB trajectory.
+            frame_mask = torch.zeros(
+                (num_frames, num_frames), dtype=torch.bool, device=device
+            )
+            condition_columns = torch.tensor(
+                condition_indices, dtype=torch.long, device=device
+            )
+            frame_mask[rgb_condition_index, condition_columns] = True
+            frame_mask[raymap_condition_index, condition_columns] = True
+            frame_mask[
+                rgb_condition_index + 1 : raymap_condition_index,
+                : raymap_condition_index + 1,
+            ] = True
+            frame_mask[raymap_condition_index + 1 :, :] = True
+            return frame_mask.repeat_interleave(
+                video_tokens_per_frame, dim=0
+            ).repeat_interleave(video_tokens_per_frame, dim=1)
+
         raise ValueError(f"Unsupported video attention mask mode: {self.video_attention_mask_mode}")
 
     def pre_dit(

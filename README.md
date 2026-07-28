@@ -310,6 +310,21 @@ Then run RoboTwin evaluation:
 python experiments/robotwin/run_robotwin_manager.py task={task_name} ckpt={ckpt_path}
 ```
 
+To evaluate a selected task subset on non-contiguous physical GPUs:
+
+```bash
+python experiments/robotwin/run_robotwin_manager.py \
+  task={task_name} \
+  ckpt={ckpt_path} \
+  'EVALUATION.task_names=[task_a,task_b]' \
+  'MULTIRUN.gpu_ids=[2,7]' \
+  MULTIRUN.max_tasks_per_gpu=1
+```
+
+For adapter-only LoRA checkpoints, select the matching LoRA task config. The
+single-task worker will load the original pretrained video DiT before applying
+the adapter.
+
 Common `task_name` examples:
 
 ```text

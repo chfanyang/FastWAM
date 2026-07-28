@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from omegaconf import OmegaConf
 from PIL import Image
 
 from fastwam.representations.rothko import RothkoCodec, RothkoCodecConfig
 from fastwam.utils.logging_config import get_logger
 
+from ..lora import (
+    LoRAConfig,
+    count_lora_parameters,
+    inject_lora,
+    load_lora_state_dict,
+    lora_state_dict,
+)
 from .helpers.loader import load_wan22_ti2v_5b_components
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
 
@@ -30,6 +39,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
     continuous temporal RoPE positions 0..9.
     """
     is_visual_action_model = True
+    legacy_video_attention_mask_mode = "condition_frames_causal"
 
     def __init__(
         self,
@@ -107,6 +117,9 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         )
         self.device = torch.device(device)
         self.torch_dtype = torch_dtype
+        self.base_model_id: Optional[str] = None
+        self.lora_config: Optional[dict[str, Any]] = None
+        self.lora_train_proprio_encoder = True
         self.to(self.device)
 
     @classmethod
@@ -170,6 +183,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             "text_encoder": components.text_encoder_path,
             "tokenizer": components.tokenizer_path,
         }
+        model.base_model_id = str(model_id)
         return model
 
     @torch.no_grad()
@@ -566,7 +580,11 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             if current_endpose.ndim == 1:
                 current_endpose = current_endpose.unsqueeze(0)
             pose, gripper = self.raymap_codec.decode(
-                decoded_raymap, current_endpose.to(decoded_raymap.device)
+                decoded_raymap,
+                current_endpose.to(
+                    device=decoded_raymap.device,
+                    dtype=torch.float32,
+                ),
             )
             ee_action = torch.cat(
                 (
@@ -586,35 +604,131 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             )
         return result
 
-    def save_checkpoint(self, path, optimizer=None, step=None) -> None:
-        payload: dict[str, Any] = {
-            "dit": self.dit.state_dict(),
-            "step": step,
-            "torch_dtype": str(self.torch_dtype),
-            "visual_action_config": {
-                **self.raymap_codec.metadata(),
-                "action_horizon": self.action_horizon,
-                "latent_layout": "rgb_then_raymap",
-                "temporal_rope_mode": self.temporal_rope_mode,
-                "condition_latent_indices": list(self.condition_latent_indices),
+    @property
+    def is_lora_enabled(self) -> bool:
+        return self.lora_config is not None
+
+    def enable_lora(
+        self,
+        config: LoRAConfig | dict[str, Any],
+        *,
+        train_proprio_encoder: bool = True,
+    ) -> dict[str, Any]:
+        if not isinstance(config, LoRAConfig):
+            config = LoRAConfig.from_dict(config)
+        module_names = inject_lora(self.dit, config)
+        self.lora_config = config.to_dict()
+        self.lora_train_proprio_encoder = bool(train_proprio_encoder)
+        parameter_count, module_count = count_lora_parameters(self.dit)
+        if module_count != len(module_names):
+            raise RuntimeError(
+                f"LoRA module count mismatch: {module_count} vs {len(module_names)}."
+            )
+        logger.info(
+            "Enabled LoRA on video DiT: modules=%d parameters=%d rank=%d "
+            "alpha=%.4f dropout=%.4f train_proprio_encoder=%s",
+            module_count,
+            parameter_count,
+            config.rank,
+            config.alpha,
+            config.dropout,
+            self.lora_train_proprio_encoder,
+        )
+        return {
+            **config.to_dict(),
+            "module_count": module_count,
+            "parameter_count": parameter_count,
+            "train_proprio_encoder": self.lora_train_proprio_encoder,
+        }
+
+    def _visual_action_checkpoint_config(self) -> dict[str, Any]:
+        video_attention_mask_mode = str(
+            getattr(self.video_expert, "video_attention_mask_mode", "")
+        ).strip()
+        if not video_attention_mask_mode:
+            raise ValueError(
+                "Cannot save a video-only checkpoint without "
+                "`video_expert.video_attention_mask_mode`."
+            )
+        return {
+            **self.raymap_codec.metadata(),
+            "action_horizon": self.action_horizon,
+            "latent_layout": "rgb_then_raymap",
+            "temporal_rope_mode": self.temporal_rope_mode,
+            "condition_latent_indices": list(self.condition_latent_indices),
+            "video_attention_mask_mode": video_attention_mask_mode,
+            "loss_weights": {
+                "rgb": self.loss_lambda_rgb,
+                "raymap": self.loss_lambda_raymap,
             },
         }
-        if self.proprio_encoder is not None:
-            payload["proprio_encoder"] = self.proprio_encoder.state_dict()
-        if optimizer is not None:
-            payload["optimizer"] = optimizer.state_dict()
-        torch.save(payload, path)
 
-    def load_checkpoint(self, path, optimizer=None) -> dict[str, Any]:
-        payload = torch.load(path, map_location="cpu", weights_only=False)
-        if "dit" not in payload:
-            raise ValueError(f"Video-only checkpoint is missing `dit`: {path}")
-        visual_config = payload.get("visual_action_config")
-        if not isinstance(visual_config, dict):
+    def _validate_visual_action_checkpoint_config(
+        self,
+        visual_config: dict[str, Any],
+        *,
+        checkpoint_path: str,
+    ) -> None:
+        expected_attention_mode = str(
+            getattr(self.video_expert, "video_attention_mask_mode", "")
+        ).strip()
+        if not expected_attention_mode:
             raise ValueError(
-                "Checkpoint is not a video-only Rothko checkpoint because "
-                f"`visual_action_config` is missing: {path}"
+                "Cannot load a video-only checkpoint without "
+                "`video_expert.video_attention_mask_mode`."
             )
+
+        checkpoint_attention_mode = visual_config.get(
+            "video_attention_mask_mode"
+        )
+        if checkpoint_attention_mode is None:
+            run_config_mode = None
+            run_config_path = None
+            checkpoint = Path(checkpoint_path).resolve()
+            for parent in list(checkpoint.parents)[:4]:
+                candidate = parent / "config.yaml"
+                if not candidate.is_file():
+                    continue
+                run_config = OmegaConf.load(candidate)
+                configured_mode = OmegaConf.select(
+                    run_config,
+                    "model.video_dit_config.video_attention_mask_mode",
+                )
+                if configured_mode is not None:
+                    run_config_mode = str(configured_mode).strip()
+                    run_config_path = candidate
+                break
+
+            if run_config_mode:
+                checkpoint_attention_mode = run_config_mode
+                logger.warning(
+                    "Checkpoint %s predates attention-mask metadata; recovered "
+                    "video_attention_mask_mode=%s from run config %s.",
+                    checkpoint_path,
+                    checkpoint_attention_mode,
+                    run_config_path,
+                )
+            else:
+                checkpoint_attention_mode = self.legacy_video_attention_mask_mode
+                logger.warning(
+                    "Checkpoint %s predates attention-mask metadata and has no "
+                    "usable run config; treating it as legacy "
+                    "video_attention_mask_mode=%s.",
+                    checkpoint_path,
+                    checkpoint_attention_mode,
+                )
+        checkpoint_attention_mode = str(checkpoint_attention_mode).strip()
+        if checkpoint_attention_mode != expected_attention_mode:
+            raise ValueError(
+                "Checkpoint attention-mask semantics mismatch: "
+                f"checkpoint={checkpoint_attention_mode!r}, "
+                f"model={expected_attention_mode!r}. Legacy checkpoints without "
+                "`video_attention_mask_mode` were trained with "
+                f"{self.legacy_video_attention_mask_mode!r}. Use the matching "
+                "model.video_dit_config.video_attention_mask_mode override, or "
+                "start a fresh training run."
+            )
+
         expected_metadata = {
             "action_horizon": self.action_horizon,
             "latent_layout": "rgb_then_raymap",
@@ -628,7 +742,137 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                     f"Checkpoint metadata mismatch for {key}: "
                     f"checkpoint={actual!r}, model={expected!r}."
                 )
-        self.dit.load_state_dict(payload["dit"], strict=True)
+
+    def save_checkpoint(self, path, optimizer=None, step=None) -> None:
+        payload: dict[str, Any] = {
+            "step": step,
+            "torch_dtype": str(self.torch_dtype),
+            "visual_action_config": self._visual_action_checkpoint_config(),
+        }
+        if self.is_lora_enabled:
+            adapter_state = lora_state_dict(self.dit)
+            parameter_count, module_count = count_lora_parameters(self.dit)
+            payload.update(
+                {
+                    "checkpoint_type": "lora_adapter",
+                    "lora": adapter_state,
+                    "fine_tuning": {
+                        "method": "lora",
+                        "base_model_id": self.base_model_id,
+                        "lora": {
+                            **dict(self.lora_config or {}),
+                            "module_count": module_count,
+                            "parameter_count": parameter_count,
+                        },
+                        "train_proprio_encoder": self.lora_train_proprio_encoder,
+                    },
+                }
+            )
+        else:
+            payload["checkpoint_type"] = "full"
+            payload["dit"] = self.dit.state_dict()
+        if self.proprio_encoder is not None:
+            proprio_state = self.proprio_encoder.state_dict()
+            if self.is_lora_enabled:
+                proprio_state = {
+                    key: value.detach().cpu().clone()
+                    for key, value in proprio_state.items()
+                }
+            payload["proprio_encoder"] = proprio_state
+        if optimizer is not None:
+            payload["optimizer"] = optimizer.state_dict()
+        torch.save(payload, path)
+
+    def load_checkpoint(self, path, optimizer=None) -> dict[str, Any]:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        visual_config = payload.get("visual_action_config")
+        if not isinstance(visual_config, dict):
+            raise ValueError(
+                "Checkpoint is not a video-only Rothko checkpoint because "
+                f"`visual_action_config` is missing: {path}"
+            )
+        self._validate_visual_action_checkpoint_config(
+            visual_config,
+            checkpoint_path=str(path),
+        )
+
+        checkpoint_type = payload.get("checkpoint_type")
+        if "lora" in payload:
+            if checkpoint_type not in (None, "lora_adapter"):
+                raise ValueError(
+                    f"LoRA payload has invalid checkpoint_type={checkpoint_type!r}."
+                )
+            fine_tuning = payload.get("fine_tuning")
+            if not isinstance(fine_tuning, dict):
+                raise ValueError(
+                    f"LoRA checkpoint is missing `fine_tuning` metadata: {path}"
+                )
+            if fine_tuning.get("method") != "lora":
+                raise ValueError(
+                    f"Unsupported fine_tuning metadata in checkpoint: {fine_tuning}"
+                )
+            lora_config_payload = fine_tuning.get("lora")
+            if not isinstance(lora_config_payload, dict):
+                raise ValueError(
+                    f"LoRA checkpoint is missing its adapter config: {path}"
+                )
+            checkpoint_base_model_id = fine_tuning.get("base_model_id")
+            if (
+                checkpoint_base_model_id
+                and self.base_model_id
+                and str(checkpoint_base_model_id) != str(self.base_model_id)
+            ):
+                raise ValueError(
+                    "LoRA base model mismatch: "
+                    f"checkpoint={checkpoint_base_model_id!r}, "
+                    f"model={self.base_model_id!r}."
+                )
+            self.enable_lora(
+                lora_config_payload,
+                train_proprio_encoder=bool(
+                    fine_tuning.get("train_proprio_encoder", True)
+                ),
+            )
+            parameter_count, module_count = count_lora_parameters(self.dit)
+            expected_module_count = lora_config_payload.get("module_count")
+            expected_parameter_count = lora_config_payload.get("parameter_count")
+            if (
+                expected_module_count is not None
+                and int(expected_module_count) != module_count
+            ):
+                raise ValueError(
+                    "LoRA module count mismatch: "
+                    f"checkpoint={expected_module_count}, model={module_count}."
+                )
+            if (
+                expected_parameter_count is not None
+                and int(expected_parameter_count) != parameter_count
+            ):
+                raise ValueError(
+                    "LoRA parameter count mismatch: "
+                    f"checkpoint={expected_parameter_count}, "
+                    f"model={parameter_count}."
+                )
+            load_lora_state_dict(self.dit, payload["lora"])
+        elif "dit" in payload:
+            if checkpoint_type not in (None, "full"):
+                raise ValueError(
+                    f"Full DiT payload has invalid checkpoint_type={checkpoint_type!r}."
+                )
+            if self.is_lora_enabled:
+                raise ValueError(
+                    "Cannot load a full fine-tuned DiT checkpoint into an "
+                    "adapter-only LoRA run. The resulting adapter would depend "
+                    "on that external fine-tuned base and would not be portable. "
+                    "Start LoRA from the configured original Wan2.2 base, or "
+                    "resume from a LoRA checkpoint/state directory."
+                )
+            self.dit.load_state_dict(payload["dit"], strict=True)
+        else:
+            raise ValueError(
+                f"Video-only checkpoint is missing both `dit` and `lora`: {path}"
+            )
+
         if self.proprio_encoder is not None:
             if "proprio_encoder" not in payload:
                 raise ValueError(

@@ -27,7 +27,7 @@ video_dit_config:
   require_vae_embedding: false
   fuse_vae_embedding_in_latents: true
   use_gradient_checkpointing: true
-  video_attention_mask_mode: condition_frames_causal
+  video_attention_mask_mode: rgb_then_raymap_block_causal
   action_conditioned: false
   action_dim: ${data.train.processor.action_output_dim}
   action_group_causal_mask_mode: group_diagonal
@@ -39,7 +39,7 @@ scheduler:
 
 loss:
   lambda_rgb: 1.0
-  lambda_raymap: 1.0
+  lambda_raymap: 5.0
 
 rothko_config:
   image_height: 384
