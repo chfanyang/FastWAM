@@ -5,6 +5,8 @@ defaults:
   - override /model: fastwam_video_only_raymap
   - _self_
 
+output_dir: ./runs/robotwin_4task_rothko_3cam_384_lora_r64_attn_ffn_1e-4/${now:%Y-%m-%d}_${now:%H-%M-%S}
+
 batch_size: 8
 num_workers: 2
 
@@ -12,30 +14,25 @@ data:
   train:
     robotwin_task_names:
       - stack_bowls_three
-     # - stack_blocks_three
       - place_shoe
-     # - lift_pot
-     # - blocks_ranking_size
       - click_alarmclock
-     # - blocks_ranking_rgb
       - turn_switch
   val:
     robotwin_task_names:
       - stack_bowls_three
-     # - stack_blocks_three
       - place_shoe
-    #  - lift_pot
-      #- blocks_ranking_size
       - click_alarmclock
-      #- blocks_ranking_rgb
       - turn_switch
+
+model:
+  proprio_dim: null
 
 lr_scheduler_type: cosine
 learning_rate: 1.0e-4
 num_epochs: 5
-max_steps: 30000
+max_steps: 10000
 log_every: 10
-save_every: 2000
+save_every: 1000
 eval_every: 500
 eval_num_inference_steps: 20
 
@@ -45,10 +42,10 @@ resume: null
 
 finetune:
   method: lora
-  train_proprio_encoder: true
+  train_proprio_encoder: false
   lora:
-    rank: 32
-    alpha: 32.0
+    rank: 64
+    alpha: 64.0
     dropout: 0.0
     target_modules:
       - self_attn.q
@@ -59,11 +56,13 @@ finetune:
       - cross_attn.k
       - cross_attn.v
       - cross_attn.o
+      - ffn.0
+      - ffn.2
 
 wandb:
   enabled: true
   workspace: null
   project: fast-wam
-  name: robotwin_video_only_rothko_3cam_384_lora_1e-4
-  group: robotwin_video_only_rothko_8task_lora_r32
+  name: robotwin_4task_rothko_lora_r64_attn_ffn
+  group: robotwin_4task_lora_capacity
   mode: online

@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 import inspect
+import os
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -122,6 +124,67 @@ def _load_registered_model(
     return model
 
 
+def _resolve_optional_safetensors_path(
+    path: str | os.PathLike[str] | None,
+) -> Path | None:
+    if path is None:
+        return None
+    path_text = str(path).strip()
+    if path_text.lower() in {"", "none", "null"}:
+        return None
+    resolved = Path(os.path.expandvars(path_text)).expanduser()
+    if not resolved.is_absolute():
+        resolved = Path.cwd() / resolved
+    resolved = resolved.resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Custom VAE safetensors not found: {resolved}")
+    if resolved.suffix.lower() != ".safetensors":
+        raise ValueError(
+            "Custom VAE override must be a `.safetensors` file, got: "
+            f"{resolved}"
+        )
+    return resolved
+
+
+def _load_custom_wan_vae(
+    path: Path,
+    *,
+    torch_dtype: torch.dtype,
+    device: str,
+) -> WanVideoVAE38:
+    vae = WanVideoVAE38()
+    state = load_state_dict(
+        str(path),
+        torch_dtype=torch_dtype,
+        device="cpu",
+    )
+    expected_keys = set(vae.state_dict())
+    provided_keys = set(state)
+    if provided_keys == expected_keys:
+        mapped_state = state
+    elif {f"model.{key}" for key in provided_keys} == expected_keys:
+        mapped_state = {f"model.{key}": value for key, value in state.items()}
+    else:
+        missing = sorted(expected_keys - provided_keys)
+        unexpected = sorted(provided_keys - expected_keys)
+        prefixed_keys = {f"model.{key}" for key in provided_keys}
+        if len(expected_keys - prefixed_keys) < len(missing):
+            missing = sorted(expected_keys - prefixed_keys)
+            unexpected = sorted(prefixed_keys - expected_keys)
+        raise ValueError(
+            "Custom VAE safetensors must contain a complete WanVideoVAE38 "
+            "state dict. "
+            f"missing={missing[:8]}, unexpected={unexpected[:8]}, path={path}"
+        )
+    vae.load_state_dict(mapped_state, strict=True)
+    vae = vae.eval().requires_grad_(False).to(
+        device=device,
+        dtype=torch_dtype,
+    )
+    logger.info("Loaded complete custom Wan VAE from %s", path)
+    return vae
+
+
 def _resolve_configs(model_id: str, tokenizer_model_id: str, redirect_common_files: bool = True):
     dit_config = ModelConfig(model_id=model_id, origin_file_pattern="diffusion_pytorch_model*.safetensors")
     text_config = ModelConfig(model_id=model_id, origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth")
@@ -148,6 +211,7 @@ def load_wan22_ti2v_5b_components(
     dit_config: dict[str, Any] | None = None,
     skip_dit_load_from_pretrain: bool = False,
     load_text_encoder: bool = True,
+    vae_safetensors_path: str | os.PathLike[str] | None = None,
 ):
     logger.info("Loading Wan2.2-TI2V-5B components...")
     start = time.time()
@@ -162,7 +226,12 @@ def load_wan22_ti2v_5b_components(
         redirect_common_files=redirect_common_files,
     )
 
-    vae_config.download_if_necessary()
+    custom_vae_path = _resolve_optional_safetensors_path(vae_safetensors_path)
+    if custom_vae_path is None:
+        vae_config.download_if_necessary()
+    else:
+        vae_config.path = str(custom_vae_path)
+        logger.info("Using custom Wan VAE safetensors: %s", custom_vae_path)
     if load_text_encoder:
         text_config.download_if_necessary()
         tokenizer_config.download_if_necessary()
@@ -207,7 +276,19 @@ def load_wan22_ti2v_5b_components(
             "Skipping pretrained text encoder/tokenizer load (`load_text_encoder=False`); "
             "training must provide cached `context/context_mask`."
         )
-    vae: WanVideoVAE38 = _load_registered_model(vae_config.path, "wan_video_vae", torch_dtype=torch_dtype, device=device)
+    if custom_vae_path is None:
+        vae: WanVideoVAE38 = _load_registered_model(
+            vae_config.path,
+            "wan_video_vae",
+            torch_dtype=torch_dtype,
+            device=device,
+        )
+    else:
+        vae = _load_custom_wan_vae(
+            custom_vae_path,
+            torch_dtype=torch_dtype,
+            device=device,
+        )
     logger.info("Finished loading Wan2.2-TI2V-5B components in %.2f seconds.", time.time() - start)
     return Wan22LoadedComponents(
         dit=dit,

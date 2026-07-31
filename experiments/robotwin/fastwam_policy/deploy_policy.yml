@@ -12,6 +12,7 @@ sim_cfg_path: null
 sim_task: null
 sim_cfg_name: sim_robotwin.yaml
 finetune_method: null
+vae_safetensors_path: null
 mixed_precision: bf16
 device: cuda
 dataset_stats_path: null

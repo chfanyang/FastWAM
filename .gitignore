@@ -11,6 +11,7 @@ evaluate_results/
 .deepspeed*
 third_party/RoboTwin/assets
 third_party/RoboTwin/policy/fastwam_policy
+third_party/LIBERO/
 
 
 # ai coding

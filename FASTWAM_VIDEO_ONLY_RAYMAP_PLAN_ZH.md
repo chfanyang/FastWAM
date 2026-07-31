@@ -1,6 +1,6 @@
 # FastWAM Video-Only Raymap Action 方案与备选设计
 
-最后更新：2026-07-24
+最后更新：2026-07-28
 
 ## 1. 文档目的
 
@@ -43,7 +43,17 @@ Rothko latent: 5, 6, 7, 8, 9
 - 实现联合 RGB/Rothko 去噪、Rothko decode 和 16D EE action 输出；
 - RoboTwin policy 自动识别新模型并使用 `action_type="ee"`，旧模型仍使用 qpos；
 - 为第一批 8 个 RoboTwin 任务完成 17,748 条唯一语言指令的 embedding 缓存；
-- 在物理 GPU 6、7 上完成 100-step、双卡 ZeRO-1 真实训练并成功保存 checkpoint。
+- 在物理 GPU 6、7 上完成 100-step、双卡 ZeRO-1 真实训练并成功保存 checkpoint；
+- 增加原生 LoRA、adapter-only checkpoint 以及 full/LoRA 双加载路径；
+- 增加 rank-64、attention + FFN 的单任务 `click_alarmclock` 配置；
+- 当前单任务配置关闭 qpos/proprio token，只保留语言作为 cross-attention 条件；
+- 将旧 `condition_frames_causal` 改为与 `[RGB | Rothko]` 布局匹配的
+  `rgb_then_raymap_block_causal`；
+- 将默认 Rothko loss 权重由 1 提高为 5；
+- RoboTwin rollout 保持 16 步开环 action chunk，但每个环境步都获取新观测用于流畅录像；
+- 支持为每次 replan 分别保存模型预测的 RGB 和 Rothko MP4；
+- EE decode 的当前绝对位姿 anchor 改为 FP32，避免 BF16 量化误差；
+- checkpoint 新增 attention-mask 语义校验，并可从旧 run 的 `config.yaml` 恢复缺失元信息。
 
 真实模型验证结果：
 
@@ -2586,3 +2596,404 @@ warning，只剩未显式 `destroy_process_group()` 的退出 warning，两个�
 - 单 episode overfit；
 - 8 任务正式训练；
 - RoboTwin 闭环评测。
+
+## 17. 2026-07-26 至 2026-07-28 的当前改造
+
+本节记录第 16 节第一版 LoRA 之后的实际代码演进。第 16 节保留为历史设计和对比
+依据；当前单任务实验应以本节及下面的配置文件为准：
+
+```text
+configs/task/robotwin_click_alarmclock_rothko_3cam_384_lora_r64_attn_ffn_1e-4.yaml
+configs/model/fastwam_video_only_raymap.yaml
+configs/sim_robotwin.yaml
+```
+
+### 17.1 为什么先改成单任务高容量 LoRA
+
+早期 4/8 任务 rank-32 attention-only LoRA 在约 1k step 后 RGB loss 基本进入平台，
+继续训练到约 7k step 仍主要上下波动。闭环评测也没有得到可用表现。当前判断是：
+
+- 需要同时学习 RoboTwin RGB、Rothko 新视觉分布和新的 block 时序关系；
+- attention-only adapter 只能调整 token 交互，不能充分调整每层 FFN 的特征变换；
+- 多任务训练会让“容量不足、任务冲突、控制链路问题”混在一起，难以定位。
+
+因此新增单任务 `click_alarmclock` 配置，先判断模型是否能够把一个任务真正学会。当前
+配置不是从 released FastWAM checkpoint 继续训练，而是：
+
+```text
+original Wan-AI/Wan2.2-TI2V-5B
+    + newly initialized LoRA adapters
+```
+
+LoRA 当前设置：
+
+```text
+rank = 64
+alpha = 64
+dropout = 0
+targets:
+    self_attn.q/k/v/o
+    cross_attn.q/k/v/o
+    ffn.0
+    ffn.2
+```
+
+30 层总计：
+
+```text
+attention LoRA modules = 240
+FFN LoRA modules = 60
+all LoRA modules = 300
+trainable LoRA parameters = 161,218,560
+approximately 3.22% of the 4,999,849,152-parameter Video DiT
+```
+
+这比 rank-32 attention-only 的 47,185,920 个参数大约增加到 3.42 倍。当前配置的
+训练参数：
+
+```text
+task = click_alarmclock
+per-GPU batch size = 8
+gradient accumulation = 2
+learning rate = 1e-4
+max steps = 10,000
+save every = 1,000
+eval every = 500
+```
+
+四卡时 effective global batch 为：
+
+```text
+8 x 4 x 2 = 64
+```
+
+### 17.2 当前不再把 qpos 拼到语言 token 后
+
+单任务配置显式设置：
+
+```yaml
+model:
+  proprio_dim: null
+
+finetune:
+  train_proprio_encoder: false
+```
+
+因此当前模型的 cross-attention context 只有语言 embedding，不再把当前 normalized
+qpos 经 `proprio_encoder` 映射后追加到语言 token。这样做是为了避免随机初始化的
+qpos token 污染语言条件，并让实验更直接地检验：
+
+```text
+语言 + 当前 RGB + 当前 Rothko
+    -> 未来 RGB + 未来 Rothko
+```
+
+当前模型实际上没有显式接收绝对 EE pose。Rothko codec 以每个 action chunk 的第一帧
+为坐标基准，所以 `RAY_0` 中：
+
+```text
+relative position = 0
+relative rotation = identity
+```
+
+`RAY_0` 只保留固定的 canonical ray pattern 和当前 gripper 编码，不包含当前绝对
+位置或绝对朝向。当前 RGB 可能让模型间接推断机器人状态，但这不等价于精确的绝对
+EE pose。真实的 `current_endpose` 只在模型生成 Rothko 后提供给几何 decoder，用于
+把相对轨迹恢复成世界坐标，并没有参与 DiT 预测。这是当前无 qpos 方案的明确设计
+风险。后续备选包括：
+
+1. 重新引入独立的 state token，但不与语言语义混为同一类 token；
+2. 为语言、状态、RGB、Rothko 增加显式 modality/type embedding；
+3. 在 Rothko 图中加入更直接的绝对位姿锚点；
+4. 保持当前无 qpos 版本作为消融基线。
+
+### 17.3 RGB 与 Rothko 的当前 attention mask
+
+VAE latent 的时间布局保持：
+
+```text
+[RGB_0, RGB_1, RGB_2, RGB_3, RGB_4,
+ RAY_0, RAY_1, RAY_2, RAY_3, RAY_4]
+```
+
+其中 `RGB_0` 和 `RAY_0` 是 clean condition，其余 8 个 latent frame 被加噪并参与
+flow-matching。旧 `condition_frames_causal` 只限制两个 condition query 不能读取
+future token，但所有 future RGB/Rothko query 仍能读取完整的两段 noisy future。
+这不符合“先生成未来 RGB，再让动作图利用未来世界轨迹”的预期依赖关系。
+
+当前改为：
+
+```text
+video_attention_mask_mode = rgb_then_raymap_block_causal
+```
+
+其 frame-level 可见关系为：
+
+```text
+query RGB_0 / RAY_0:
+    only keys RGB_0 and RAY_0
+
+query future RGB:
+    all RGB keys + RAY_0
+    cannot see future noisy Rothko keys
+
+query future Rothko:
+    all RGB keys + all Rothko keys
+```
+
+因此未来 RGB 不会利用待预测的未来 Rothko，而未来 Rothko 可以利用联合去噪得到的
+完整未来 RGB 轨迹。这里的 “block causal” 是模态 block 方向上的因果约束，不是
+RGB block 内逐帧的下三角时间因果；同一个 diffusion forward 中，未来 RGB frame
+之间仍是双向 attention。
+
+模型会检查：
+
+- condition frame 必须恰好是两个；
+- RGB condition 必须是 frame 0；
+- Rothko condition 必须位于第二个等长 block 的起点；
+- `[RGB | Rothko]` 两段 latent frame 数必须相同。
+
+### 17.4 Rothko loss 权重提高到 5
+
+当前模型配置：
+
+```yaml
+loss:
+  lambda_rgb: 1.0
+  lambda_raymap: 5.0
+```
+
+总 loss 为：
+
+```text
+loss_total = loss_rgb_raw + 5 * loss_raymap_raw
+```
+
+需要特别注意：Trainer/W&B 中记录的 `loss_raymap` 已经乘过
+`lambda_raymap=5`，不是 raw Rothko MSE。因此读取曲线时：
+
+```text
+raw Rothko loss = logged loss_raymap / 5
+```
+
+提高权重的目的不是改变 diffusion target，而是避免数值明显更小的 Rothko latent
+loss 在联合优化中被 RGB 主导。后续比较不同权重时必须同时保存 raw 和 weighted
+loss；当前实现的日志只直接给出 weighted value。
+
+### 17.5 Action chunk 与录像连续性修正
+
+训练数据保持 17 个连续 timestep：
+
+```text
+num_frames = 17
+global_sample_stride = 1
+action_video_freq_ratio = 1
+```
+
+因此一个训练窗口是：
+
+```text
+当前帧 + 连续未来 16 帧
+```
+
+窗口起点由 dataset sampler 在所有合法窗口中随机抽样。Rothko future pose 是相对
+当前 action chunk 的第一帧/当前 EE anchor 编码，不是统一相对整个 episode 的第一
+帧。
+
+评测控制策略仍是：
+
+```text
+一次 forward 预测 16 步
+连续执行这 16 步
+队列耗尽后再用新观测 replan
+```
+
+之前 `skip_get_obs_within_replan=true` 会让 RoboTwin 在执行 action queue 时跳过中间
+观测获取，导致保存的 rollout MP4 看起来像两帧之间隔了很久。这不是 dataset 抽样
+间隔，也不是模型只预测稀疏帧，而是评测录像没有逐环境步刷新。
+
+当前配置改为：
+
+```yaml
+EVALUATION:
+  skip_get_obs_within_replan: false
+```
+
+现在每个 simulator step 都获取并记录最新观测，所以 rollout 视频连续；但 policy
+的 `should_request_observation()` 仍只在 action queue 为空时要求把观测送入模型。
+也就是说控制仍是 16 步 open-loop chunk，并没有变成每步重新推理。
+
+### 17.6 EE decode 精度修正
+
+Rothko future pose 是相对当前 EE pose 的表示，decode 时需要用当前绝对
+`endpose` 恢复世界坐标。此前当前 pose anchor 可能被转换成 BF16，毫米级位置和小角度
+旋转会受到不必要的量化影响。
+
+当前在 policy 和模型内部都将 decode anchor 显式保持为：
+
+```text
+torch.float32
+```
+
+Raymap 网络本身仍按训练 mixed precision 运行；这里只提高几何恢复阶段的 anchor
+精度，不增加 DiT 的显存开销。
+
+### 17.7 Checkpoint 的 attention 语义与 LoRA 加载
+
+新 checkpoint 的 `visual_action_config` 会额外保存：
+
+```text
+video_attention_mask_mode
+loss_weights.rgb
+loss_weights.raymap
+```
+
+加载时会严格检查当前模型和 checkpoint 的 attention mask 是否一致，防止把用旧
+`condition_frames_causal` 训练的权重静默放进
+`rgb_then_raymap_block_causal` 模型。
+
+部分已经启动的长程 run 使用的是新 mask，但其进程在 checkpoint metadata 代码更新
+之前启动，所以 `.pt` 内没有 `video_attention_mask_mode`。对这类 checkpoint，loader
+会向上查找相邻 run 的 `config.yaml`，读取：
+
+```text
+model.video_dit_config.video_attention_mask_mode
+```
+
+如果既没有 checkpoint 字段，也找不到有效 run config，才按真正的旧 checkpoint
+处理为：
+
+```text
+condition_frames_causal
+```
+
+LoRA 评测时必须给出具体 adapter 文件，例如：
+
+```text
+.../checkpoints/weights/step_010000.pt
+```
+
+不能把 `.../checkpoints/` 目录传给 `ckpt`。adapter-only checkpoint 加载流程是先从
+原始 Wan2.2 构建 base，再根据 checkpoint 元信息注入并加载 LoRA；full checkpoint
+则加载完整 DiT state。
+
+### 17.8 预测 RGB/Rothko 视频保存
+
+RoboTwin 评测配置新增：
+
+```yaml
+EVALUATION:
+  save_prediction_videos: true
+```
+
+每次模型重新规划后，都会把本次 forward 生成的两种模态分别保存：
+
+```text
+<evaluation output>/
+  predictions/
+    <task_config>/
+      episode_000/
+        replan_000_env_step_0000_rgb.mp4
+        replan_000_env_step_0000_raymap.mp4
+        replan_001_env_step_0016_rgb.mp4
+        replan_001_env_step_0016_raymap.mp4
+```
+
+两个视频均为 10 FPS。RGB 视频使用模型实际看到/生成的 `384 x 320` 三相机布局：
+
+```text
+top 256 x 320: head camera
+bottom-left 128 x 160: left wrist
+bottom-right 128 x 160: right wrist
+```
+
+Rothko 视频是独立的 `384 x 320` 图，而不是与 RGB 合并在同一张像素图内。两者先
+分别通过同一个 Wan VAE，再在 latent 时间维按 `[RGB block | Rothko block]` 拼接。
+
+RoboTwin 自带的 episode rollout MP4 使用另一套可视化画布：上方 raw head camera
+较窄，右上可能出现黑色 padding，下方放两个 wrist camera。该黑块只属于 simulator
+录像布局，不是模型 RGB 输入的一部分。
+
+### 17.9 Manager 与 single evaluation 改造
+
+`run_robotwin_manager.py` 当前支持：
+
+- `EVALUATION.task_name=<one task>`；
+- `EVALUATION.task_names=[task_a,task_b,...]`；
+- `MULTIRUN.gpu_ids=[4,5,6,7]` 形式的非连续物理 GPU；
+- `MULTIRUN.max_tasks_per_gpu`；
+- worker 失败时终止同批其余 worker 并保存 summary；
+- 预先校验未知 task；
+- 禁止同时设置 `task_name` 和 `task_names`。
+
+Hydra list override 需要整体作为一个 shell argument。正确写法：
+
+```bash
+'EVALUATION.task_names=[stack_bowls_three,place_shoe,click_alarmclock,blocks_ranking_rgb]'
+'MULTIRUN.gpu_ids=[4,5,6,7]'
+```
+
+引号由 shell 消费，不会传入 Python 字符串；其作用是避免 shell 对方括号等字符做
+展开。开引号后不能多一个前导空格，例如下面是错误的：
+
+```text
+' EVALUATION.task_names=[...]'
+```
+
+`eval_robotwin_single.py` 还会把 `finetune.method`、预测视频开关、dataset stats 和
+Rothko stats 的绝对路径传入 RoboTwin policy。LoRA 模式强制加载原始 base；
+Rothko stats 相对路径会先按 FastWAM 项目根目录解析，避免子进程切换到 RoboTwin
+目录后找错文件。
+
+### 17.10 当前单任务训练与评测命令
+
+四卡训练：
+
+```bash
+conda activate fastwam
+cd /mnt/hwdata/cfy/FastWAM
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 \
+MASTER_PORT=29543 \
+DIFFSYNTH_MODEL_BASE_PATH=/mnt/hwdata/cfy/FastWAM/checkpoints \
+bash scripts/train_zero1.sh 4 \
+  task=robotwin_click_alarmclock_rothko_3cam_384_lora_r64_attn_ffn_1e-4
+```
+
+使用 10k adapter、GPU 7 做单任务闭环评测：
+
+```bash
+conda activate fastwam_robotwin
+cd /mnt/hwdata/cfy/FastWAM
+
+TOKENIZERS_PARALLELISM=false \
+DIFFSYNTH_MODEL_BASE_PATH=/mnt/hwdata/cfy/FastWAM/checkpoints \
+python experiments/robotwin/run_robotwin_manager.py \
+  task=robotwin_click_alarmclock_rothko_3cam_384_lora_r64_attn_ffn_1e-4 \
+  ckpt=/mnt/hwdata/cfy/FastWAM/runs/robotwin_click_alarmclock_rothko_3cam_384_lora_r64_attn_ffn_1e-4/2026-07-26_12-27-09/checkpoints/weights/step_010000.pt \
+  EVALUATION.task_name=click_alarmclock \
+  EVALUATION.eval_num_episodes=15 \
+  EVALUATION.replan_steps=16 \
+  EVALUATION.save_prediction_videos=true \
+  EVALUATION.dataset_stats_path=/mnt/hwdata/cfy/FastWAM/runs/robotwin_click_alarmclock_rothko_3cam_384_lora_r64_attn_ffn_1e-4/2026-07-26_12-27-09/dataset_stats.json \
+  'MULTIRUN.gpu_ids=[7]' \
+  MULTIRUN.max_tasks_per_gpu=1
+```
+
+`TOKENIZERS_PARALLELISM=false` 只关闭 Hugging Face tokenizer 内部 CPU thread pool，
+用于避免 tokenizer 初始化后再 `fork` 时的 deadlock warning；它不关闭多 GPU
+评测，也不改变模型输出。
+
+### 17.11 当前仍需验证的事项
+
+下一阶段应优先比较：
+
+1. 单任务 10k checkpoint 的完整 15-episode `demo_clean` 和
+   `demo_randomized` 成功率；
+2. 保存的 predicted RGB/Rothko MP4 是否具有正确时序、布局和动作方向；
+3. 每次 replan 的第 1 步 EE jump，以及 16 步 chunk 末端累计误差；
+4. 新 block mask 与旧 `condition_frames_causal` 的同配置消融；
+5. `lambda_raymap=1/2/5` 的 raw loss、decode error 和闭环成功率；
+6. rank-64 attention-only、rank-64 attention+FFN 和 full fine-tuning；
+7. 无 qpos、独立 state token、带 modality embedding 三种条件方式；
+8. 单任务验证稳定后，再逐步扩展到 4 任务和完整 8 任务。

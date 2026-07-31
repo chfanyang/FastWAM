@@ -5,7 +5,6 @@ import time
 import numpy as np
 import traceback
 import torch
-import torchvision.transforms.functional as transforms_F
 from contextlib import contextmanager
 
 from omegaconf import DictConfig, OmegaConf
@@ -15,6 +14,7 @@ from .base_lerobot_dataset import BaseLerobotDataset
 from .robotwin_tasks import resolve_robotwin_episode_indices
 from .utils.normalizer import save_dataset_stats_to_json, load_dataset_stats_from_json
 from ..dataset_utils import ResizeSmallestSideAspectPreserving, CenterCrop, Normalize
+from ..robotwin_rgb import build_robotwin_rgb_canvas
 from fastwam.utils.logging_config import get_logger
 from fastwam.utils import misc, pytorch_utils
 from fastwam.representations.rothko import RothkoCodec, RothkoCodecConfig
@@ -199,26 +199,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 raise ValueError(
                     f"`concat_multi_camera='robotwin'` requires exactly 3 cameras, got {num_cameras}"
                 )
-            cam_top = transforms_F.resize(
-                video[0],
-                size=[256, 320],
-                interpolation=transforms_F.InterpolationMode.BILINEAR,
-                antialias=True,
-            )  # [T_video, C, 256, 320]
-            cam_left = transforms_F.resize(
-                video[1],
-                size=[128, 160],
-                interpolation=transforms_F.InterpolationMode.BILINEAR,
-                antialias=True,
-            )  # [T_video, C, 128, 160]
-            cam_right = transforms_F.resize(
-                video[2],
-                size=[128, 160],
-                interpolation=transforms_F.InterpolationMode.BILINEAR,
-                antialias=True,
-            )  # [T_video, C, 128, 160]
-            bottom = torch.cat([cam_left, cam_right], dim=-1)  # [T_video, C, 128, 320]
-            video = torch.cat([cam_top, bottom], dim=-2)  # [T_video, C, 384, 320]
+            video = build_robotwin_rgb_canvas(
+                head=video[0],
+                left_wrist=video[1],
+                right_wrist=video[2],
+            )
         elif num_cameras > 1:
             if self.concat_multi_camera == "horizontal":
                 video = torch.cat([video[i] for i in range(num_cameras)], dim=-1)  # [T_video, C, H, num_cameras*W]
@@ -232,10 +217,12 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         else:
             video = video.squeeze(0)  # [T_video, C, H, W]
 
-        # final resize and normalization
-        video = self.resize_transform(video)
-        video = self.crop_transform(video)
-        video = self.normalize_transform(video)  # [T_video, C, H, W]
+        if self.concat_multi_camera != "robotwin":
+            # The shared RoboTwin builder already returns the exact target
+            # shape and applies the same [-1, 1] normalization.
+            video = self.resize_transform(video)
+            video = self.crop_transform(video)
+            video = self.normalize_transform(video)  # [T_video, C, H, W]
 
         video = video.permute(1, 0, 2, 3) # [C, T_video, H, W], range [-1, 1]
 

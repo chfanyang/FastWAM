@@ -26,6 +26,7 @@ if str(SRC_ROOT) not in sys.path:
 from fastwam.datasets.lerobot.processors.fastwam_processor import FastWAMProcessor
 from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
 from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
+from fastwam.datasets.robotwin_rgb import build_robotwin_rgb_canvas
 from fastwam.utils.video_io import save_mp4
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,20 @@ def _prepare_model_cfg(
     if method == "lora":
         model_cfg_copy.skip_dit_load_from_pretrain = False
 
+    vae_safetensors_path = model_cfg_copy.get("vae_safetensors_path")
+    if not _is_none_like(vae_safetensors_path):
+        vae_path = Path(
+            os.path.expandvars(os.path.expanduser(str(vae_safetensors_path)))
+        )
+        if not vae_path.is_absolute():
+            vae_path = PROJECT_ROOT / vae_path
+        vae_path = vae_path.resolve()
+        if not vae_path.is_file():
+            raise FileNotFoundError(
+                f"Custom VAE safetensors not found: {vae_path}"
+            )
+        model_cfg_copy.vae_safetensors_path = str(vae_path)
+
     rothko_stats = model_cfg_copy.get("rothko_norm_stats")
     if not _is_none_like(rothko_stats):
         stats_path = Path(
@@ -168,12 +183,6 @@ def _resolve_dataset_stats_path(dataset_stats_path: Optional[str]) -> Path:
     if not resolved.exists():
         raise FileNotFoundError(f"Dataset stats path not found: {resolved}")
     return resolved
-
-
-def _resize_rgb(image: np.ndarray, size_wh: tuple[int, int]) -> np.ndarray:
-    pil_image = Image.fromarray(image.astype(np.uint8), mode="RGB")
-    resized = pil_image.resize(size_wh, resample=Image.BILINEAR)
-    return np.asarray(resized, dtype=np.uint8)
 
 
 class WorldActionRobotWinPolicy:
@@ -297,17 +306,14 @@ class WorldActionRobotWinPolicy:
 
     def _build_robotwin_image_tensor(self, observation: Dict[str, Any]) -> torch.Tensor:
         obs_data = observation["observation"]
-        head = _resize_rgb(obs_data["head_camera"]["rgb"], (320, 256))
-        left = _resize_rgb(obs_data["left_camera"]["rgb"], (160, 128))
-        right = _resize_rgb(obs_data["right_camera"]["rgb"], (160, 128))
-        bottom = np.concatenate([left, right], axis=1)
-        image = np.concatenate([head, bottom], axis=0)  # [384, 320, 3]
-
-        image_tensor = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).to(
+        image_tensor = build_robotwin_rgb_canvas(
+            head=obs_data["head_camera"]["rgb"],
+            left_wrist=obs_data["left_camera"]["rgb"],
+            right_wrist=obs_data["right_camera"]["rgb"],
+        ).unsqueeze(0).to(
             device=self.model.device,
             dtype=self.model.torch_dtype,
         )
-        image_tensor = image_tensor * (2.0 / 255.0) - 1.0
         return image_tensor
 
     def _build_current_raymap(
@@ -564,6 +570,12 @@ def get_model(usr_args: Dict[str, Any]):
         sim_cfg_name=sim_cfg_name,
         sim_task=sim_task,
     )
+    model_cfg = OmegaConf.create(
+        OmegaConf.to_container(cfg.model, resolve=True)
+    )
+    vae_safetensors_path = usr_args.get("vae_safetensors_path")
+    if not _is_none_like(vae_safetensors_path):
+        model_cfg.vae_safetensors_path = str(vae_safetensors_path)
 
     checkpoint_path = usr_args.get("ckpt_setting")
     if _is_none_like(checkpoint_path):
@@ -640,7 +652,7 @@ def get_model(usr_args: Dict[str, Any]):
         )
 
     policy = WorldActionRobotWinPolicy(
-        model_cfg=cfg.model,
+        model_cfg=model_cfg,
         processor_cfg=cfg.data.train.processor,
         checkpoint_path=str(checkpoint_path),
         dataset_stats_path=dataset_stats_path,
