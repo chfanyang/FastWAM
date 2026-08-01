@@ -26,6 +26,8 @@ EVALUATION:
   binarize_gripper: true
   use_action_ensembler: false
   visualize_future_video: false
+  save_prediction_videos: false
+  save_control_trace: false
 
   # Action inference
   action_horizon: null
@@ -50,6 +52,9 @@ MULTIRUN:
     - libero_object
   num_gpus: 8
   max_tasks_per_gpu: 2
+  # Hard upper bound for one suite/task worker. The manager terminates the
+  # worker and reports it as failed instead of holding a GPU indefinitely.
+  worker_timeout_seconds: 21600
 
 hydra:
   job:

@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from accelerate import PartialState
 from hydra.utils import instantiate
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from PIL import Image
 from tqdm import tqdm
 
@@ -36,11 +36,21 @@ from experiments.libero.libero_utils import (
     save_rollout_video,
 )
 from fastwam.datasets.lerobot.processors.fastwam_processor import FastWAMProcessor
+from fastwam.datasets.libero_rgb import build_libero_rgb_canvas
+from fastwam.representations.libero_osc import (
+    absolute_target_to_normalized_action,
+    panda_gripper_qpos_to_open,
+)
 from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
 from fastwam.utils.pytorch_utils import set_global_seed
+from fastwam.utils.video_io import save_mp4
 from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
 from libero.libero import benchmark
-from action_ensembler import ActionEnsembler
+
+try:
+    from .action_ensembler import ActionEnsembler
+except ImportError:  # Direct execution: python experiments/libero/eval_libero_single.py
+    from action_ensembler import ActionEnsembler
 
 OmegaConf.register_new_resolver("eval", eval)
 OmegaConf.register_new_resolver("max", lambda x: max(x))
@@ -117,39 +127,6 @@ def _resolve_dataset_stats_path(cfg: DictConfig) -> Path:
 def _load_model_checkpoint(model: torch.nn.Module, ckpt: str) -> None:
     model.load_checkpoint(ckpt)
     logging.info("Loaded checkpoint via model.load_checkpoint: %s", ckpt)
-    return
-
-    # deprecated legacy checkpoint loading
-    payload = torch.load(ckpt, map_location="cpu")
-    if not isinstance(payload, dict):
-        raise ValueError(f"Legacy checkpoint payload must be dict, got: {type(payload)}")
-
-    if "mot" in payload and hasattr(model, "mot"):
-        missing, unexpected = model.mot.load_state_dict(payload["mot"], strict=False)
-        logging.warning(
-            "Loaded fallback `mot` state_dict with strict=False. Missing=%d Unexpected=%d",
-            len(missing),
-            len(unexpected),
-        )
-        return
-
-    state_dict = None
-    for key in ("model_state_dict", "state_dict", "model"):
-        value = payload.get(key)
-        if isinstance(value, dict):
-            state_dict = value
-            break
-    if state_dict is None and all(torch.is_tensor(v) for v in payload.values()):
-        state_dict = payload
-    if state_dict is None:
-        raise ValueError(f"Cannot parse legacy checkpoint keys from: {ckpt}")
-
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    logging.warning(
-        "Loaded fallback model state_dict with strict=False. Missing=%d Unexpected=%d",
-        len(missing),
-        len(unexpected),
-    )
 
 
 def _center_crop_resize(image: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -206,7 +183,31 @@ def _obs_to_model_input(
 
     concatenation = cfg.data.train.get("concat_multi_camera", "horizontal")
     num_cameras = processor.num_output_cameras
-    if num_cameras == 1:
+    is_visual_action = (
+        str(cfg.data.train.get("raymap_representation", ""))
+        == "libero_rothko"
+    )
+    if is_visual_action:
+        if num_cameras != 2 or concatenation != "horizontal":
+            raise ValueError(
+                "LIBERO Rothko eval requires two horizontal cameras, got "
+                f"num_cameras={num_cameras}, concat={concatenation!r}."
+            )
+        primary_h, primary_w = _meta_to_hw(image_meta[0], camera_idx=0)
+        wrist_h, wrist_w = _meta_to_hw(image_meta[1], camera_idx=1)
+        if (primary_h, primary_w) != (wrist_h, wrist_w):
+            raise ValueError(
+                "LIBERO Rothko requires equal per-camera shapes, got "
+                f"{(primary_h, primary_w)} and {(wrist_h, wrist_w)}."
+            )
+        rgb_tensor = build_libero_rgb_canvas(
+            imgs["image"],
+            imgs["wrist_image"],
+            camera_height=primary_h,
+            camera_width=primary_w,
+        )
+        rgb = None
+    elif num_cameras == 1:
         primary_h, primary_w = _meta_to_hw(image_meta[0], camera_idx=0)
         rgb = _center_crop_resize(imgs["image"], width=primary_w, height=primary_h)
     elif num_cameras == 2:
@@ -223,7 +224,10 @@ def _obs_to_model_input(
     else:
         raise ValueError(f"LIBERO eval currently supports num_output_cameras in [1, 2], got {num_cameras}.")
 
-    actual_h, actual_w = int(rgb.shape[0]), int(rgb.shape[1])
+    if is_visual_action:
+        actual_h, actual_w = int(rgb_tensor.shape[-2]), int(rgb_tensor.shape[-1])
+    else:
+        actual_h, actual_w = int(rgb.shape[0]), int(rgb.shape[1])
     expected_h, expected_w = int(height), int(width)
     image_shapes = [meta["shape"] for meta in image_meta]
     assert actual_h == expected_h and actual_w == expected_w, (
@@ -233,8 +237,16 @@ def _obs_to_model_input(
         f"shape_meta.images={image_shapes}, concat_multi_camera={concatenation}."
     )
 
-    x = torch.tensor(rgb).permute(2, 0, 1).unsqueeze(0).to(device=device, dtype=dtype)
-    x = x * (2.0 / 255.0) - 1.0
+    if is_visual_action:
+        x = rgb_tensor.unsqueeze(0).to(device=device, dtype=dtype)
+    else:
+        x = (
+            torch.tensor(rgb)
+            .permute(2, 0, 1)
+            .unsqueeze(0)
+            .to(device=device, dtype=dtype)
+        )
+        x = x * (2.0 / 255.0) - 1.0
 
     proprio = _normalize_proprio(_extract_sim_state(obs), processor)
 
@@ -254,6 +266,50 @@ def _extract_sim_state(obs: dict) -> np.ndarray:
         )
     ).astype(np.float32)
     return state
+
+
+def _extract_absolute_pose_wxyz(obs: dict) -> torch.Tensor:
+    position = torch.as_tensor(obs["robot0_eef_pos"], dtype=torch.float32)
+    quaternion_xyzw = torch.as_tensor(
+        obs["robot0_eef_quat"], dtype=torch.float32
+    )
+    quaternion_wxyz = quaternion_xyzw[[3, 0, 1, 2]]
+    quaternion_wxyz = quaternion_wxyz / quaternion_wxyz.norm().clamp_min(1e-12)
+    return torch.cat((position, quaternion_wxyz), dim=-1)
+
+
+def _extract_gripper_open(obs: dict) -> torch.Tensor:
+    qpos = torch.as_tensor(obs["robot0_gripper_qpos"], dtype=torch.float32)
+    return panda_gripper_qpos_to_open(qpos)
+
+
+def _is_libero_rothko(cfg: DictConfig) -> bool:
+    return (
+        str(cfg.data.train.get("raymap_representation", ""))
+        == "libero_rothko"
+    )
+
+
+def _absolute_target_to_env_action(
+    obs: dict,
+    target_pose_wxyz: np.ndarray | torch.Tensor,
+    gripper_open: np.ndarray | torch.Tensor | float,
+    *,
+    binarize_gripper: bool,
+) -> np.ndarray:
+    current_pose = _extract_absolute_pose_wxyz(obs)
+    target_pose = torch.as_tensor(target_pose_wxyz, dtype=torch.float32)
+    motion = absolute_target_to_normalized_action(
+        current_pose, target_pose, clip=True
+    )
+    open_value = float(torch.as_tensor(gripper_open).reshape(-1)[0])
+    if binarize_gripper:
+        open_value = float(open_value >= 0.5)
+    # LIBERO environment convention: -1=open, +1=close.
+    env_gripper = 1.0 - 2.0 * float(np.clip(open_value, 0.0, 1.0))
+    return np.concatenate(
+        (motion.detach().cpu().numpy(), np.asarray([env_gripper], dtype=np.float32))
+    ).astype(np.float32)
 
 
 def _denormalize_action(action: torch.Tensor, processor: FastWAMProcessor) -> np.ndarray:
@@ -279,14 +335,71 @@ def _get_num_video_frames(cfg: DictConfig) -> int:
     return (int(cfg.data.train.num_frames) - 1) // int(cfg.data.train.action_video_freq_ratio) + 1
 
 
+def _validate_eval_runtime_cfg(cfg: DictConfig) -> int:
+    num_trials = int(cfg.EVALUATION.num_trials)
+    if num_trials <= 0:
+        raise ValueError(f"EVALUATION.num_trials must be positive, got {num_trials}.")
+
+    configured_horizon = int(cfg.data.train.num_frames) - 1
+    action_horizon_cfg = cfg.EVALUATION.get("action_horizon", None)
+    action_horizon = (
+        configured_horizon
+        if action_horizon_cfg is None
+        else int(action_horizon_cfg)
+    )
+    if action_horizon <= 0:
+        raise ValueError(
+            f"EVALUATION.action_horizon must be positive, got {action_horizon}."
+        )
+    if _is_libero_rothko(cfg) and action_horizon != configured_horizon:
+        raise ValueError(
+            "A LIBERO visual-action checkpoint has a fixed horizon determined by "
+            f"data.train.num_frames ({configured_horizon}). Got "
+            f"EVALUATION.action_horizon={action_horizon}; select the matching h16/h32 "
+            "task config instead of overriding the horizon at evaluation time."
+        )
+
+    replan_steps = int(cfg.EVALUATION.get("replan_steps", 5))
+    if replan_steps <= 0:
+        raise ValueError(f"EVALUATION.replan_steps must be positive, got {replan_steps}.")
+    if replan_steps > action_horizon:
+        raise ValueError(
+            f"EVALUATION.replan_steps ({replan_steps}) cannot exceed the model "
+            f"action horizon ({action_horizon})."
+        )
+    action_video_freq_ratio = int(cfg.data.train.action_video_freq_ratio)
+    if _record_prediction_videos(cfg) and replan_steps % action_video_freq_ratio != 0:
+        raise ValueError(
+            "Saving predicted videos requires EVALUATION.replan_steps to be "
+            "divisible by data.train.action_video_freq_ratio, got "
+            f"{replan_steps} and {action_video_freq_ratio}."
+        )
+    return action_horizon
+
+
+def _repeat_initial_states(initial_states: Any, num_trials: int) -> list[Any]:
+    """Return exactly ``num_trials`` states without mutating LIBERO's tensor."""
+    available = len(initial_states)
+    if available <= 0:
+        raise ValueError("LIBERO returned no initial states for this task.")
+    return [initial_states[index % available] for index in range(num_trials)]
+
+
+def _record_prediction_videos(cfg: DictConfig) -> bool:
+    return bool(
+        cfg.EVALUATION.get("visualize_future_video", False)
+        or cfg.EVALUATION.get("save_prediction_videos", False)
+    )
+
+
 def _validate_visualize_future_video_cfg(cfg: DictConfig) -> None:
-    if not bool(cfg.EVALUATION.get("visualize_future_video", False)):
+    if not _record_prediction_videos(cfg):
         return
 
     action_conditioned = cfg.model.video_dit_config.get("action_conditioned", None)
     if action_conditioned is not False:
         raise ValueError(
-            "EVALUATION.visualize_future_video=true requires "
+            "Saving predicted future video requires "
             "model.video_dit_config.action_conditioned=false."
         )
 
@@ -367,7 +480,7 @@ def _predict_action_chunk(
     input_w: int,
     input_h: int,
     model_device: str,
-) -> tuple[np.ndarray, dict, Optional[list[Image.Image]]]:
+) -> tuple[Any, dict, Optional[list[Image.Image]]]:
     num_inference_steps_cfg = cfg.EVALUATION.get("num_inference_steps", None)
     if num_inference_steps_cfg is None:
         num_inference_steps = int(cfg.get("eval_num_inference_steps", 20))
@@ -403,8 +516,51 @@ def _predict_action_chunk(
         "rand_device": str(cfg.EVALUATION.get("rand_device", "cpu")),
         "tiled": bool(cfg.EVALUATION.get("tiled", False)),
     }
-    visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
+    visualize_future_video = _record_prediction_videos(cfg)
     predicted_future_frames = None
+    if _is_libero_rothko(cfg):
+        current_pose = _extract_absolute_pose_wxyz(obs)
+        current_gripper = _extract_gripper_open(obs)
+        input_raymap = model.raymap_codec.encode(
+            current_pose.unsqueeze(0),
+            current_gripper.unsqueeze(0),
+        )[:, 0].unsqueeze(0)
+        visual_kwargs = {
+            "prompt": prompt,
+            "input_image": image,
+            "input_raymap": input_raymap.to(
+                device=model_device, dtype=model.torch_dtype
+            ),
+            "current_endpose": current_pose,
+            "proprio": proprio,
+            "num_frames": _get_num_video_frames(cfg),
+            "num_inference_steps": num_inference_steps,
+            "sigma_shift": infer_kwargs["sigma_shift"],
+            "seed": infer_kwargs["seed"],
+            "rand_device": infer_kwargs["rand_device"],
+            "tiled": infer_kwargs["tiled"],
+        }
+        with torch.no_grad():
+            pred = model.infer(**visual_kwargs)
+        if "pose" not in pred or "gripper" not in pred:
+            raise ValueError(
+                "LIBERO Rothko model inference did not return pose/gripper."
+            )
+        predicted_future_frames = (
+            _select_predicted_future_frames(pred["video"], cfg)
+            if _record_prediction_videos(cfg)
+            else None
+        )
+        visual_chunk = {
+            "target_pose": pred["pose"][0, 1:].float().cpu().numpy(),
+            "gripper_open": pred["gripper"][0, 1:].float().cpu().numpy(),
+        }
+        if _record_prediction_videos(cfg):
+            visual_chunk["predicted_raymap_frames"] = (
+                model._video_tensor_to_pil(pred["raymap"][0])
+            )
+        return visual_chunk, imgs, predicted_future_frames
+
     if visualize_future_video:
         infer_kwargs["num_video_frames"] = _get_num_video_frames(cfg)
     elif "num_video_frames" in inspect.signature(model.infer_action).parameters:
@@ -455,12 +611,18 @@ def run_single_episode(
     input_w: int,
     input_h: int,
     model_device: str,
-) -> tuple[bool, list, list[dict[str, Any]], Optional[float]]:
+) -> tuple[
+    bool,
+    list,
+    list[dict[str, Any]],
+    Optional[float],
+    list[dict[str, Any]],
+]:
     max_steps = _get_max_steps(cfg.EVALUATION.task_suite_name)
     replan_steps = int(cfg.EVALUATION.get("replan_steps", 5))
     num_steps_wait = int(cfg.EVALUATION.get("num_steps_wait", 5))
     use_action_ensembler = bool(cfg.EVALUATION.get("use_action_ensembler", False))
-    visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
+    visualize_future_video = _record_prediction_videos(cfg)
     capture_steps = set(_get_future_frame_capture_steps(cfg)[1:])
 
     env.reset()
@@ -471,11 +633,13 @@ def run_single_episode(
 
     replay_images = []
     predicted_future_video_clips: list[dict[str, Any]] = []
+    control_trace: list[dict[str, Any]] = []
     episode_future_clip_psnr: list[float] = []
     pending_actions: list[list[float]] = []
     current_predicted_future_clip: Optional[dict[str, Any]] = None
     current_replan_step = 0
     current_replan_idx = -1
+    executed_any_action = False
 
     t = 0
     done = False
@@ -499,17 +663,32 @@ def run_single_episode(
                 input_h=input_h,
                 model_device=model_device,
             )
+            current_replan_idx += 1
             if predicted_future_frames is not None:
-                current_replan_idx += 1
                 current_predicted_future_clip = {
                     "replan_idx": current_replan_idx,
                     "gt_frames": [imgs.copy()],
                     "pred_frames": predicted_future_frames,
                 }
+                if isinstance(action_chunk, dict):
+                    current_predicted_future_clip["pred_raymap_frames"] = (
+                        action_chunk.get("predicted_raymap_frames")
+                    )
             else:
                 current_predicted_future_clip = None
             current_replan_step = 0
-            if use_action_ensembler:
+            if isinstance(action_chunk, dict):
+                if use_action_ensembler:
+                    raise ValueError(
+                        "ActionEnsembler is not defined for absolute LIBERO Rothko targets."
+                    )
+                target_pose = action_chunk["target_pose"]
+                gripper_open = action_chunk["gripper_open"]
+                pending_actions = [
+                    (target_pose[index], gripper_open[index], index)
+                    for index in range(min(replan_steps, len(target_pose)))
+                ]
+            elif use_action_ensembler:
                 ensembler.add_actions(action_chunk, t)
                 pending_actions = [ensembler.get_action(ts).tolist() for ts in range(t, t + replan_steps)]
             else:
@@ -519,7 +698,50 @@ def run_single_episode(
             imgs = get_libero_image(obs)
             replay_images.append(imgs.copy())
 
-        obs, _, done, _ = env.step(pending_actions.pop(0))
+        pending = pending_actions.pop(0)
+        if _is_libero_rothko(cfg):
+            target_pose, gripper_open, target_index = pending
+            actual_pose_before = _extract_absolute_pose_wxyz(obs)
+            raw_motion = absolute_target_to_normalized_action(
+                actual_pose_before,
+                torch.as_tensor(target_pose, dtype=torch.float32),
+                clip=False,
+            )
+            action_to_execute = _absolute_target_to_env_action(
+                obs,
+                target_pose,
+                gripper_open,
+                binarize_gripper=bool(
+                    cfg.EVALUATION.get("binarize_gripper", True)
+                ),
+            )
+            if bool(cfg.EVALUATION.get("save_control_trace", False)):
+                control_trace.append(
+                    {
+                        "episode": int(episode_idx),
+                        "env_step": int(t),
+                        "replan_index": int(current_replan_idx),
+                        "target_index": int(target_index),
+                        "predicted_target_xyz": np.asarray(target_pose)[:3].tolist(),
+                        "predicted_target_quaternion_wxyz": np.asarray(
+                            target_pose
+                        )[3:7].tolist(),
+                        "actual_xyz_before_action": actual_pose_before[:3].tolist(),
+                        "actual_quaternion_wxyz_before_action": actual_pose_before[
+                            3:7
+                        ].tolist(),
+                        "sent_delta_action": action_to_execute.tolist(),
+                        "predicted_gripper_open": float(
+                            np.asarray(gripper_open).reshape(-1)[0]
+                        ),
+                        "clipped_dimensions": (
+                            raw_motion.abs() > 1.0
+                        ).nonzero(as_tuple=False).flatten().tolist(),
+                    }
+                )
+        else:
+            action_to_execute = pending
+        obs, _, done, _ = env.step(action_to_execute)
         if visualize_future_video and current_predicted_future_clip is not None:
             current_replan_step += 1
             if current_replan_step in capture_steps:
@@ -554,6 +776,10 @@ def run_single_episode(
                 current_predicted_future_clip["pred_frames"] = current_predicted_future_clip["pred_frames"][
                     :expected_frame_count
                 ]
+                if current_predicted_future_clip.get("pred_raymap_frames") is not None:
+                    current_predicted_future_clip["pred_raymap_frames"] = (
+                        current_predicted_future_clip["pred_raymap_frames"][:expected_frame_count]
+                    )
                 assert len(current_predicted_future_clip["gt_frames"]) == len(
                     current_predicted_future_clip["pred_frames"]
                 ), (
@@ -570,15 +796,28 @@ def run_single_episode(
                     episode_future_clip_psnr.append(clip_psnr)
                 predicted_future_video_clips.append(current_predicted_future_clip)
                 current_predicted_future_clip = None
+        executed_any_action = True
         if done:
             break
         t += 1
     pbar.close()
 
+    # The loop records each pre-action observation. Preserve the final
+    # post-action observation as well so rollout videos include the terminal
+    # state (success or timeout) instead of ending one control step early.
+    if executed_any_action:
+        replay_images.append(get_libero_image(obs).copy())
+
     episode_mean_psnr = (
         float(np.mean(episode_future_clip_psnr)) if len(episode_future_clip_psnr) > 0 else None
     )
-    return bool(done), replay_images, predicted_future_video_clips, episode_mean_psnr
+    return (
+        bool(done),
+        replay_images,
+        predicted_future_video_clips,
+        episode_mean_psnr,
+        control_trace,
+    )
 
 
 def run_single_task(
@@ -596,7 +835,7 @@ def run_single_task(
     model_device: str,
 ) -> dict:
     env, task_description = get_libero_env(task, LIBERO_ENV_RESOLUTION, cfg.get("seed"))
-    visualize_future_video = bool(cfg.EVALUATION.get("visualize_future_video", False))
+    visualize_future_video = _record_prediction_videos(cfg)
     results = {
         "successes": 0,
         "failure_episodes": [],
@@ -608,7 +847,13 @@ def run_single_task(
         results["future_video_psnr_mean"] = None
 
     for trial_idx in range(int(cfg.EVALUATION.num_trials)):
-        success, replay_images, predicted_future_video_clips, episode_mean_psnr = run_single_episode(
+        (
+            success,
+            replay_images,
+            predicted_future_video_clips,
+            episode_mean_psnr,
+            control_trace,
+        ) = run_single_episode(
             env=env,
             initial_state=initial_states[trial_idx],
             task_description=task_description,
@@ -636,6 +881,15 @@ def run_single_task(
             success=success,
             task_description=task_description,
         )
+        if bool(cfg.EVALUATION.get("save_control_trace", False)):
+            trace_dir = video_dir.parent / "control_traces"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = trace_dir / (
+                f"task{cfg.EVALUATION.task_id}_trial{trial_idx:04d}.jsonl"
+            )
+            with trace_path.open("w", encoding="utf-8") as handle:
+                for row in control_trace:
+                    handle.write(json.dumps(row, cls=NumpyEncoder) + "\n")
         if visualize_future_video:
             if len(predicted_future_video_clips) == 0:
                 logging.warning(
@@ -658,6 +912,13 @@ def run_single_task(
                         success=success,
                         task_description=task_description,
                     )
+                    raymap_frames = clip.get("pred_raymap_frames")
+                    if raymap_frames:
+                        raymap_path = predicted_video_dir / (
+                            f"task{cfg.EVALUATION.task_id}_trial{trial_idx}"
+                            f"_replan{int(clip['replan_idx']):04d}_raymap.mp4"
+                        )
+                        save_mp4(raymap_frames, str(raymap_path), fps=8)
                 save_prediction_video(
                     predicted_video_dir,
                     all_gt_frames,
@@ -687,6 +948,7 @@ def eval_single_process(cfg: DictConfig):
     if cfg.ckpt is None:
         raise ValueError("cfg.ckpt must not be None.")
     _validate_visualize_future_video_cfg(cfg)
+    action_horizon = _validate_eval_runtime_cfg(cfg)
 
     env_num = int(cfg.EVALUATION.get("env_num", 1))
     if env_num != 1:
@@ -695,6 +957,12 @@ def eval_single_process(cfg: DictConfig):
             "Use run_libero_manager/run_libero_parallel_test.sh for multi-GPU task parallelism."
         )
 
+    if _is_libero_rothko(cfg):
+        # sim_libero's standard action-expert defaults skip loading the base
+        # DiT.  A portable LoRA checkpoint instead requires original Wan2.2.
+        with open_dict(cfg.model):
+            cfg.model.skip_dit_load_from_pretrain = False
+            cfg.model.pop("action_dit_pretrained_path", None)
     model_device = _resolve_eval_device(cfg)
     model_dtype = _mixed_precision_to_model_dtype(cfg.get("mixed_precision", "bf16"))
     model = instantiate(cfg.model, model_dtype=model_dtype, device=model_device)
@@ -706,14 +974,6 @@ def eval_single_process(cfg: DictConfig):
     processor: FastWAMProcessor = instantiate(cfg.data.train.processor).eval()
     processor.set_normalizer_from_stats(dataset_stats)
     logging.info("Using dataset stats: %s", dataset_stats_path)
-
-    action_horizon_cfg = cfg.EVALUATION.get("action_horizon", None)
-    if action_horizon_cfg is None:
-        action_horizon = int(cfg.data.train.num_frames) - 1
-    else:
-        action_horizon = int(action_horizon_cfg)
-    if action_horizon <= 0:
-        raise ValueError(f"EVALUATION.action_horizon must be positive, got {action_horizon}")
 
     video_size = cfg.data.train.get("video_size", [224, 224])
     if len(video_size) != 2:
@@ -728,16 +988,17 @@ def eval_single_process(cfg: DictConfig):
     video_dir = local_log_dir / cfg.EVALUATION.task_suite_name / "videos"
     video_dir.mkdir(parents=True, exist_ok=True)
     predicted_video_dir = local_log_dir / cfg.EVALUATION.task_suite_name / "predicted_videos"
-    if bool(cfg.EVALUATION.get("visualize_future_video", False)):
+    if _record_prediction_videos(cfg):
         predicted_video_dir.mkdir(parents=True, exist_ok=True)
 
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.EVALUATION.task_suite_name]()
     task = task_suite.get_task(cfg.EVALUATION.task_id)
     initial_states = task_suite.get_task_init_states(cfg.EVALUATION.task_id)
-
-    while len(initial_states) < int(cfg.EVALUATION.num_trials):
-        initial_states.extend(initial_states[: (int(cfg.EVALUATION.num_trials) - len(initial_states))])
+    initial_states = _repeat_initial_states(
+        initial_states,
+        int(cfg.EVALUATION.num_trials),
+    )
 
     results = {
         "task_suite": cfg.EVALUATION.task_suite_name,

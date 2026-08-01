@@ -171,6 +171,7 @@ def create_fastwam_video_only_raymap(
     scheduler=None,
     loss=None,
     action_horizon: int = 16,
+    raymap_representation: str = "rothko",
     rothko_norm_stats: str | None = None,
     rothko_config=None,
     model_dtype: torch.dtype = torch.bfloat16,
@@ -220,6 +221,7 @@ def create_fastwam_video_only_raymap(
         loss_lambda_rgb=float(loss.get("lambda_rgb", 1.0)),
         loss_lambda_raymap=float(loss.get("lambda_raymap", 1.0)),
         action_horizon=int(action_horizon),
+        raymap_representation=str(raymap_representation),
         rothko_norm_stats=rothko_norm_stats,
         rothko_config=rothko_config,
     )

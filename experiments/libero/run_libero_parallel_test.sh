@@ -24,9 +24,15 @@ run_libero_eval() {
     export RUN_ID
     OUTPUT_DIR=${OUTPUT_DIR:-"$ROOT_DIR/evaluate_results/$RUN_ID"}
     export OUTPUT_DIR  # Use run_id as the output subdirectory
-    SESSION_NAME="libero_test_v3"
+    # Each manager owns its own tmux session. Parallel evaluations no longer
+    # delete or reuse a global session belonging to another run.
+    SESSION_NAME=${SESSION_NAME:-"libero_${RUN_ID}_$$"}
+    SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -c '[:alnum:]_-' '_')
+    SESSION_CREATED=0
     EXP_NAME=${EXP_NAME:-""}
     export EXP_NAME
+    PYTHON_EXECUTABLE=${PYTHON_EXECUTABLE:-python}
+    export PYTHON_EXECUTABLE
 
     echo "EXP_NAME: $EXP_NAME"
     
@@ -34,10 +40,14 @@ run_libero_eval() {
     mkdir -p "$OUTPUT_DIR"
     echo "Evaluation results will be saved to: $OUTPUT_DIR"
 
-    # Copy task_list_file into OUTPUT_DIR
-    cp "$task_list_file" "$OUTPUT_DIR/"
-    task_list_file="$OUTPUT_DIR/$(basename $task_list_file)"
-    echo "Task list file copied to: $task_list_file"
+    # Copy an external task list into OUTPUT_DIR. The manager normally creates
+    # it there already, in which case copying the file onto itself is skipped.
+    destination_task_file="$OUTPUT_DIR/$(basename "$task_list_file")"
+    if [ "$(readlink -f "$task_list_file")" != "$(readlink -f "$destination_task_file")" ]; then
+        cp "$task_list_file" "$destination_task_file"
+    fi
+    task_list_file="$destination_task_file"
+    echo "Task list file: $task_list_file"
     
     # GPU and tmux configuration
     if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
@@ -57,6 +67,11 @@ run_libero_eval() {
 
     require_non_empty "MAX_TASKS_PER_GPU"
     require_non_empty "NUM_TRIALS"
+    WORKER_TIMEOUT_SECONDS=${WORKER_TIMEOUT_SECONDS:-21600}
+    if ! [[ "$WORKER_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: WORKER_TIMEOUT_SECONDS must be a positive integer, got '$WORKER_TIMEOUT_SECONDS'"
+        exit 1
+    fi
     TMUX_GRID_ROWS=${TMUX_GRID_ROWS:-1}
     TMUX_GRID_COLS=${TMUX_GRID_COLS:-$((MAX_TASKS_PER_GPU + 1))}
     GRID_ROWS=$TMUX_GRID_ROWS
@@ -262,15 +277,25 @@ run_libero_eval() {
     # Initialize GPU load tracking
     init_gpu_load_tracking
 
-    # Check for an existing tmux session
-    if tmux has-session -t $SESSION_NAME 2>/dev/null; then
-        # If the session exists, delete it
-        tmux kill-session -t $SESSION_NAME
-        echo "Session '$SESSION_NAME' has been deleted"
+    cleanup_tmux_session() {
+        if [ "${SESSION_CREATED:-0}" -eq 1 ] && tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+            echo "Cleaning up tmux session '$SESSION_NAME'..."
+            tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+        fi
+        SESSION_CREATED=0
+    }
+    trap cleanup_tmux_session EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo "Error: tmux session '$SESSION_NAME' already exists; refusing to delete another run."
+        return 1
     fi
 
     # Create a new detached session
-    tmux new-session -d -s $SESSION_NAME
+    tmux new-session -d -s "$SESSION_NAME"
+    SESSION_CREATED=1
 
     # Create the grid layout
     create_grid_layout() {
@@ -330,20 +355,38 @@ run_libero_eval() {
         
         rm -f "$status_file"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching task: $suite task_id=$task_id on GPU$gpu_id pane $pane_info"
+
+        local root_q exp_q status_q log_q result_q gpu_q python_q config_q ckpt_q suite_q task_id_q trials_q output_q
+        printf -v root_q '%q' "$ROOT_DIR"
+        printf -v exp_q '%q' "$EXP_NAME"
+        printf -v status_q '%q' "$status_file"
+        printf -v log_q '%q' "$log_file"
+        printf -v result_q '%q' "$result_file"
+        printf -v gpu_q '%q' "$gpu_id"
+        printf -v python_q '%q' "$PYTHON_EXECUTABLE"
+        printf -v config_q '%q' "$CONFIG"
+        printf -v ckpt_q '%q' "$CKPT"
+        printf -v suite_q '%q' "$suite"
+        printf -v task_id_q '%q' "$task_id"
+        printf -v trials_q '%q' "$NUM_TRIALS"
+        printf -v output_q '%q' "$OUTPUT_DIR"
         
         # Launch the task in a tmux pane.
         # When the task exits, write a status file so the scheduler can detect failures promptly.
-        tmux select-pane -t $SESSION_NAME:$pane_info 2>/dev/null
-        tmux send-keys -t $SESSION_NAME:$pane_info "clear" C-m 2>/dev/null
-        tmux send-keys -t $SESSION_NAME:$pane_info "source ~/.bashrc && cd $ROOT_DIR && export EXP_NAME=$EXP_NAME && \
-            STATUS_FILE='$status_file' LOG_FILE='$log_file' RESULT_FILE='$result_file' && \
-            CUDA_VISIBLE_DEVICES=$gpu_id python experiments/libero/eval_libero_single.py \
-            task=$CONFIG ckpt=$CKPT \
-            EVALUATION.task_suite_name=$suite EVALUATION.task_id=$task_id gpu_id=$gpu_id \
-            EVALUATION.num_trials=$NUM_TRIALS EVALUATION.output_dir=$OUTPUT_DIR $EXTRA_ARGS > \"\$LOG_FILE\" 2>&1; \
+        tmux select-pane -t "$SESSION_NAME:$pane_info" 2>/dev/null
+        tmux send-keys -t "$SESSION_NAME:$pane_info" "clear" C-m 2>/dev/null
+        tmux send-keys -t "$SESSION_NAME:$pane_info" "cd $root_q && export EXP_NAME=$exp_q && \
+            STATUS_FILE=$status_q LOG_FILE=$log_q RESULT_FILE=$result_q && \
+            CUDA_VISIBLE_DEVICES=$gpu_q timeout --signal=TERM --kill-after=60 ${WORKER_TIMEOUT_SECONDS}s \
+            $python_q experiments/libero/eval_libero_single.py \
+            task=$config_q ckpt=$ckpt_q \
+            EVALUATION.task_suite_name=$suite_q EVALUATION.task_id=$task_id_q gpu_id=$gpu_q \
+            EVALUATION.num_trials=$trials_q EVALUATION.output_dir=$output_q $EXTRA_ARGS > \"\$LOG_FILE\" 2>&1; \
             rc=\$?; \
             if [ \$rc -eq 0 ] && [ -f \"\$RESULT_FILE\" ]; then \
                 echo \"SUCCESS|$gpu_id|\$rc|\$(date +%s)|\$LOG_FILE\" > \"\$STATUS_FILE\"; \
+            elif [ \$rc -eq 124 ]; then \
+                echo \"TIMEOUT|$gpu_id|\$rc|\$(date +%s)|\$LOG_FILE\" > \"\$STATUS_FILE\"; \
             else \
                 echo \"FAILED|$gpu_id|\$rc|\$(date +%s)|\$LOG_FILE\" > \"\$STATUS_FILE\"; \
             fi" C-m 2>/dev/null
@@ -395,11 +438,11 @@ run_libero_eval() {
             # The task process exited with failure: detect it, report it, and reclaim the mapping
             if [ -f "$status_file" ]; then
                 IFS='|' read -r status status_gpu status_rc status_ts status_log < "$status_file"
-                if [ "$status" = "FAILED" ]; then
+                if [ "$status" = "FAILED" ] || [ "$status" = "TIMEOUT" ]; then
                     local new_load=$(decrement_gpu_load "$gpu_id")
                     mark_task_failed "$suite" "$task_id" "$gpu_id" "${status_rc:-unknown}" "${status_log:-unknown}"
                     ((NEW_FAILURE_COUNT++))
-                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Task failed: $suite task_id=$task_id rc=$status_rc GPU$gpu_id (current load: $new_load/$MAX_TASKS_PER_GPU)"
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Task $status: $suite task_id=$task_id rc=$status_rc GPU$gpu_id (current load: $new_load/$MAX_TASKS_PER_GPU)"
                     rm -f "$status_file"
                     continue
                 fi
@@ -432,7 +475,7 @@ run_libero_eval() {
     local monitoring_interval=${MONITORING_INTERVAL:-10}  # Monitoring interval in seconds
     local last_status_time=0
     local status_interval=${STATUS_INTERVAL:-30}  # Status display interval in seconds
-    local max_launch_per_round=${MAX_LAUNCH_PER_ROUND:-$MAX_TASKS_PER_GPU}
+    local max_launch_per_round=${MAX_LAUNCH_PER_ROUND:-$((NUM_GPUS * MAX_TASKS_PER_GPU))}
     
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Total tasks: $total_tasks"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Max tasks per GPU: $MAX_TASKS_PER_GPU"
@@ -511,6 +554,8 @@ run_libero_eval() {
         if [ "$new_failures" -gt 0 ]; then
             echo "Detected failed subtasks, stopping the scheduler. Failure details: $FAILED_TASKS_FILE"
             cat "$FAILED_TASKS_FILE"
+            cleanup_tmux_session
+            trap - EXIT INT TERM
             return 2
         fi
 
@@ -584,6 +629,8 @@ run_libero_eval() {
             echo "Scheduling inconsistency: no running tasks and no pending tasks, but not all tasks are complete."
             echo "Completed: $total_completed/$total_tasks, failed: $total_failed"
             [ -s "$FAILED_TASKS_FILE" ] && cat "$FAILED_TASKS_FILE"
+            cleanup_tmux_session
+            trap - EXIT INT TERM
             return 2
         fi
         
@@ -625,7 +672,11 @@ run_libero_eval() {
     echo "All tasks completed successfully!"
     # Run the result summarization script
     echo "Generating evaluation report..."
-    python experiments/libero/summarize_results.py --output_dir="$OUTPUT_DIR"
+    "$PYTHON_EXECUTABLE" experiments/libero/summarize_results.py --output_dir="$OUTPUT_DIR"
+    local summarize_rc=$?
+    cleanup_tmux_session
+    trap - EXIT INT TERM
+    return "$summarize_rc"
 }
 
 

@@ -1,0 +1,57 @@
+_target_: fastwam.runtime.create_fastwam_video_only_raymap
+model_id: Wan-AI/Wan2.2-TI2V-5B
+tokenizer_model_id: Wan-AI/Wan2.1-T2V-1.3B
+tokenizer_max_len: 128
+load_text_encoder: false
+proprio_dim: null
+redirect_common_files: true
+vae_safetensors_path: null
+skip_dit_load_from_pretrain: false
+action_horizon: 16
+raymap_representation: libero_rothko
+rothko_norm_stats: ${data.train.rothko_norm_stats}
+
+video_dit_config:
+  has_image_input: false
+  patch_size: [1, 2, 2]
+  in_dim: 48
+  hidden_dim: 3072
+  ffn_dim: 14336
+  freq_dim: 256
+  text_dim: 4096
+  out_dim: 48
+  num_heads: 24
+  attn_head_dim: 128
+  num_layers: 30
+  eps: 1.0e-06
+  seperated_timestep: true
+  require_clip_embedding: false
+  require_vae_embedding: false
+  fuse_vae_embedding_in_latents: true
+  use_gradient_checkpointing: true
+  video_attention_mask_mode: rgb_then_raymap_block_causal
+  action_conditioned: false
+  action_dim: ${data.train.processor.action_output_dim}
+  action_group_causal_mask_mode: group_diagonal
+
+scheduler:
+  train_shift: 5.0
+  infer_shift: 5.0
+  num_train_timesteps: 1000
+
+loss:
+  lambda_rgb: 1.0
+  lambda_raymap: 5.0
+
+rothko_config:
+  image_height: 224
+  image_width: 448
+  tile_height: 224
+  tile_width: 224
+  focal: 0.2
+  center_scale: 1.0
+  dir_scale: 1.0
+  center_frac: 0.5
+  boundary_margin: 8
+  outer_margin: 8
+  duplicate_horizontal: true

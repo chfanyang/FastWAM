@@ -2,6 +2,7 @@ import logging
 import json
 import inspect
 import os
+import random
 import re
 from math import ceil
 from pathlib import Path
@@ -26,6 +27,57 @@ from .utils.video_metrics import pil_frames_to_video_tensor, video_psnr, video_s
 logger = get_logger(__name__)
 
 
+def _decoded_pose_metrics(
+    predicted_pose: torch.Tensor,
+    target_pose: torch.Tensor,
+    predicted_gripper: torch.Tensor,
+    target_gripper: torch.Tensor,
+) -> dict[str, float]:
+    """Compute unit-aware pose metrics with quaternion sign invariance."""
+    if predicted_pose.shape != target_pose.shape:
+        raise ValueError(
+            f"Pose shape mismatch: {tuple(predicted_pose.shape)} vs {tuple(target_pose.shape)}"
+        )
+    pose_dim = int(predicted_pose.shape[-1])
+    if pose_dim % 7 != 0:
+        raise ValueError(f"Decoded pose dim must be a multiple of 7, got {pose_dim}.")
+    num_arms = pose_dim // 7
+    predicted = predicted_pose.reshape(*predicted_pose.shape[:-1], num_arms, 7)
+    target = target_pose.reshape(*target_pose.shape[:-1], num_arms, 7)
+
+    position_difference = predicted[..., :3] - target[..., :3]
+    predicted_quaternion = torch.nn.functional.normalize(
+        predicted[..., 3:7], dim=-1, eps=1e-8
+    )
+    target_quaternion = torch.nn.functional.normalize(
+        target[..., 3:7], dim=-1, eps=1e-8
+    )
+    # q and -q represent the same rotation, hence abs(dot).
+    quaternion_dot = (
+        predicted_quaternion * target_quaternion
+    ).sum(dim=-1).abs().clamp(0.0, 1.0)
+    rotation_error_deg = torch.rad2deg(2.0 * torch.acos(quaternion_dot))
+
+    predicted_gripper = predicted_gripper.float()
+    target_gripper = target_gripper.float()
+    if predicted_gripper.shape != target_gripper.shape:
+        raise ValueError(
+            "Gripper shape mismatch: "
+            f"{tuple(predicted_gripper.shape)} vs {tuple(target_gripper.shape)}"
+        )
+    return {
+        "decoded_position_mae_m": float(position_difference.abs().mean()),
+        "decoded_position_rmse_m": float(position_difference.square().mean().sqrt()),
+        "decoded_rotation_geodesic_deg": float(rotation_error_deg.mean()),
+        "decoded_gripper_mae": float(
+            (predicted_gripper - target_gripper).abs().mean()
+        ),
+        "decoded_gripper_accuracy": float(
+            ((predicted_gripper >= 0.5) == (target_gripper >= 0.5)).float().mean()
+        ),
+    }
+
+
 class Wan22Trainer:
     def __init__(self, model, train_dataset, val_dataset=None, *, cfg: DictConfig):
         self.model = model
@@ -37,6 +89,7 @@ class Wan22Trainer:
         self.weight_decay = float(cfg.weight_decay)
         self.batch_size = int(cfg.batch_size)
         self.num_workers = int(cfg.num_workers)
+        self.pin_memory = bool(cfg.get("pin_memory", torch.cuda.is_available()))
         self.num_epochs = int(cfg.num_epochs)
         max_steps = cfg.max_steps
         self.max_steps = int(max_steps) if max_steps is not None else None
@@ -44,6 +97,17 @@ class Wan22Trainer:
         self.save_every = int(cfg.save_every)
         self.eval_every = int(cfg.eval_every)
         self.eval_num_inference_steps = int(cfg.eval_num_inference_steps)
+        self.eval_sample_index = int(cfg.get("eval_sample_index", 0))
+        self.eval_num_samples = int(cfg.get("eval_num_samples", 4))
+        self.eval_random_seed = int(cfg.get("eval_random_seed", 42))
+        if self.eval_sample_index < 0:
+            raise ValueError(
+                f"`eval_sample_index` must be non-negative, got {self.eval_sample_index}."
+            )
+        if self.eval_num_samples < 1:
+            raise ValueError(
+                f"`eval_num_samples` must be positive, got {self.eval_num_samples}."
+            )
         self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
         self.max_grad_norm = float(cfg.max_grad_norm)
         self.seed = int(cfg.seed)
@@ -222,7 +286,7 @@ class Wan22Trainer:
             shuffle=False,
             sampler=self.train_sampler,
             num_workers=self.num_workers,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=self.pin_memory,
             worker_init_fn=worker_init_fn,
         )
 
@@ -455,11 +519,43 @@ class Wan22Trainer:
             output[key] = value
         return output
 
+    def _get_fixed_visual_action_eval_sample(self, index: int, seed: int):
+        """Load one eval sample deterministically without perturbing train RNG."""
+        numpy_state = np.random.get_state()
+        python_state = random.getstate()
+        try:
+            np.random.seed(seed % (2**32))
+            random.seed(seed)
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(seed)
+                sample = self.val_dataset[index]
+        finally:
+            np.random.set_state(numpy_state)
+            random.setstate(python_state)
+        return self._to_batched_eval_sample(sample)
+
     @torch.no_grad()
-    def _evaluate_visual_action(self, model, sample, was_dit_training):
-        with self.accelerator.autocast():
-            val_loss, _ = model.training_loss(sample)
-            val_loss_value = float(val_loss.float().item())
+    def _evaluate_visual_action(
+        self,
+        model,
+        sample,
+        was_dit_training,
+        *,
+        eval_sample_index: int,
+        eval_seed: int,
+    ):
+        cuda_devices = []
+        if self.accelerator.device.type == "cuda":
+            cuda_devices = [self.accelerator.device.index]
+        # Validation must not consume or perturb training RNG state.  The same
+        # fixed sample receives the same timestep/noise at every evaluation.
+        with torch.random.fork_rng(devices=cuda_devices):
+            torch.manual_seed(eval_seed)
+            if self.accelerator.device.type == "cuda":
+                torch.cuda.manual_seed(eval_seed)
+            with self.accelerator.autocast():
+                val_loss, _ = model.training_loss(sample)
+                val_loss_value = float(val_loss.float().item())
 
         video0 = sample["video"][0]
         raymap0 = sample["raymap"][0]
@@ -474,7 +570,7 @@ class Wan22Trainer:
             "context_mask": sample["context_mask"][0],
             "num_frames": video0.shape[1],
             "num_inference_steps": self.eval_num_inference_steps,
-            "seed": 42,
+            "seed": eval_seed,
             "tiled": False,
         }
         prediction = model.infer(**infer_kwargs)
@@ -500,21 +596,43 @@ class Wan22Trainer:
         psnr_rollout_vs_decode = video_psnr(predicted_video, vae_video)
         ssim_rollout_vs_decode = video_ssim(predicted_video, vae_video)
 
-        predicted_action = prediction.get("action")
-        target_action = torch.cat(
-            (
-                sample["future_endpose"][:, :, :7],
-                sample["future_gripper"][:, :, 0:1],
-                sample["future_endpose"][:, :, 7:14],
-                sample["future_gripper"][:, :, 1:2],
-            ),
-            dim=-1,
-        ).cpu()
-        action_l1 = action_l2 = None
-        if predicted_action is not None:
-            difference = predicted_action.float().cpu() - target_action.float()
-            action_l1 = float(difference.abs().mean())
-            action_l2 = float(difference.square().mean())
+        predicted_pose = prediction.get("pose")
+        predicted_gripper = prediction.get("gripper")
+        representation_l1 = representation_l2 = None
+        pose_metrics = {}
+        if predicted_pose is not None and predicted_gripper is not None:
+            predicted_future_pose = predicted_pose[:, 1:].float().cpu()
+            predicted_future_gripper = predicted_gripper[:, 1:].float().cpu()
+            target_future_pose = sample["future_endpose"].float().cpu()
+            target_future_gripper = sample["future_gripper"].float().cpu()
+            predicted_target = torch.cat(
+                (
+                    predicted_future_pose,
+                    predicted_future_gripper,
+                ),
+                dim=-1,
+            )
+            target = torch.cat(
+                (
+                    target_future_pose,
+                    target_future_gripper,
+                ),
+                dim=-1,
+            )
+            if predicted_target.shape != target.shape:
+                raise ValueError(
+                    "Decoded raymap target shape mismatch: "
+                    f"{tuple(predicted_target.shape)} vs {tuple(target.shape)}"
+                )
+            difference = predicted_target - target
+            representation_l1 = float(difference.abs().mean())
+            representation_l2 = float(difference.square().mean())
+            pose_metrics = _decoded_pose_metrics(
+                predicted_future_pose,
+                target_future_pose,
+                predicted_future_gripper,
+                target_future_gripper,
+            )
 
         stitched = torch.cat(
             (predicted_video, vae_video, target_video), dim=2
@@ -533,41 +651,31 @@ class Wan22Trainer:
         ]
         video_path = os.path.join(
             self.eval_dir,
-            f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}.mp4",
+            f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}"
+            f"_sample_{eval_sample_index:06d}.mp4",
         )
         save_mp4(stitched_frames, video_path, fps=8)
 
-        metrics = torch.tensor(
-            [
-                val_loss_value,
-                psnr_rollout_vs_gt,
-                ssim_rollout_vs_gt,
-                psnr_rollout_vs_decode,
-                ssim_rollout_vs_decode,
-                psnr_decode_vs_gt,
-                ssim_decode_vs_gt,
-                -1.0 if action_l2 is None else action_l2,
-                -1.0 if action_l1 is None else action_l1,
-            ],
-            device=self.accelerator.device,
-            dtype=torch.float32,
-        ).unsqueeze(0)
-        gathered = self.accelerator.gather_for_metrics(metrics).mean(dim=0)
         if was_dit_training:
             self._set_dit_only_train_mode()
         result = {
-            "val_loss": float(gathered[0]),
-            "psnr_rg": float(gathered[1]),
-            "ssim_rg": float(gathered[2]),
-            "psnr_rd": float(gathered[3]),
-            "ssim_rd": float(gathered[4]),
-            "psnr_dg": float(gathered[5]),
-            "ssim_dg": float(gathered[6]),
+            "val_loss": val_loss_value,
+            "psnr_rg": float(psnr_rollout_vs_gt),
+            "ssim_rg": float(ssim_rollout_vs_gt),
+            "psnr_rd": float(psnr_rollout_vs_decode),
+            "ssim_rd": float(ssim_rollout_vs_decode),
+            "psnr_dg": float(psnr_decode_vs_gt),
+            "ssim_dg": float(ssim_decode_vs_gt),
             "video_path": video_path,
         }
-        if action_l2 is not None:
-            result["action_l2"] = float(gathered[7])
-            result["action_l1"] = float(gathered[8])
+        if representation_l2 is not None:
+            result.update(pose_metrics)
+            result["decoded_target_l2"] = representation_l2
+            result["decoded_target_l1"] = representation_l1
+            if prediction.get("action") is not None:
+                # Preserve the existing RoboTwin metric names.
+                result["action_l2"] = representation_l2
+                result["action_l1"] = representation_l1
         return result
 
     @torch.no_grad()
@@ -579,12 +687,128 @@ class Wan22Trainer:
         was_dit_training = model.dit.training
         model.eval()
 
-        # eval_index = (self.global_step + self.accelerator.process_index) % len(self.val_dataset)
-        rng = torch.Generator(device="cpu").manual_seed(self.global_step + self.accelerator.process_index)
-        eval_index = torch.randint(0, len(self.val_dataset), (1,), generator=rng).item()
-        sample = self._to_batched_eval_sample(self.val_dataset[eval_index])
         if getattr(model, "is_visual_action_model", False):
-            return self._evaluate_visual_action(model, sample, was_dit_training)
+            metric_keys = (
+                "val_loss",
+                "psnr_rg",
+                "ssim_rg",
+                "psnr_rd",
+                "ssim_rd",
+                "psnr_dg",
+                "ssim_dg",
+                "decoded_target_l2",
+                "decoded_target_l1",
+                "action_l2",
+                "action_l1",
+                "decoded_position_mae_m",
+                "decoded_position_rmse_m",
+                "decoded_rotation_geodesic_deg",
+                "decoded_gripper_mae",
+                "decoded_gripper_accuracy",
+            )
+            per_sample_results = []
+            local_eval_indices = []
+            # `eval_num_samples` is a global group size, independent of GPU
+            # count.  Ranks split the fixed group in round-robin order.
+            local_offsets = range(
+                self.accelerator.process_index,
+                self.eval_num_samples,
+                self.accelerator.num_processes,
+            )
+            for sample_offset in local_offsets:
+                eval_index = (
+                    self.eval_sample_index
+                    + sample_offset
+                ) % len(self.val_dataset)
+                eval_seed = self.eval_random_seed + sample_offset
+                local_eval_indices.append(eval_index)
+                sample = self._get_fixed_visual_action_eval_sample(
+                    eval_index,
+                    eval_seed,
+                )
+                per_sample_results.append(
+                    self._evaluate_visual_action(
+                        model,
+                        sample,
+                        False,
+                        eval_sample_index=eval_index,
+                        eval_seed=eval_seed,
+                    )
+                )
+            if was_dit_training:
+                self._set_dit_only_train_mode()
+            logger.info(
+                "Evaluated local fixed sample indices=%s (base=%d rank=%d/%d).",
+                local_eval_indices,
+                self.eval_sample_index,
+                self.accelerator.process_index,
+                self.accelerator.num_processes,
+            )
+
+            # Aggregate sums and valid counts once, so ranks may evaluate
+            # different numbers of samples without entering per-sample
+            # collectives.
+            metric_totals = []
+            for key in metric_keys:
+                values = [
+                    float(sample_result[key])
+                    for sample_result in per_sample_results
+                    if key in sample_result
+                ]
+                metric_totals.extend((sum(values), len(values)))
+            metric_totals = torch.tensor(
+                metric_totals,
+                device=self.accelerator.device,
+                dtype=torch.float64,
+            ).unsqueeze(0)
+            gathered_totals = self.accelerator.gather(metric_totals).sum(dim=0)
+
+            result = {}
+            for key_index, key in enumerate(metric_keys):
+                total = float(gathered_totals[key_index * 2])
+                count = int(gathered_totals[key_index * 2 + 1])
+                if count:
+                    result[key] = total / count
+
+            eval_indices = [
+                (self.eval_sample_index + offset) % len(self.val_dataset)
+                for offset in range(self.eval_num_samples)
+            ]
+            result["video_paths"] = [
+                os.path.join(
+                    self.eval_dir,
+                    f"step_{self.global_step:06d}"
+                    f"_rank_{offset % self.accelerator.num_processes:03d}"
+                    f"_sample_{eval_index:06d}.mp4",
+                )
+                for offset, eval_index in enumerate(eval_indices)
+            ]
+            # Retain the singular key for callers written before grouped eval.
+            result["video_path"] = result["video_paths"][0]
+            result["eval_sample_indices"] = eval_indices
+            if self.accelerator.is_main_process:
+                logger.info(
+                    "Aggregated fixed validation group indices=%s seeds=%d..%d "
+                    "across %d rank(s).",
+                    eval_indices,
+                    self.eval_random_seed,
+                    self.eval_random_seed + self.eval_num_samples - 1,
+                    self.accelerator.num_processes,
+                )
+            return result
+
+        # Standard FastWAM keeps its existing one-sample evaluation behavior,
+        # but uses the configured fixed index instead of changing per step.
+        eval_index = (
+            self.eval_sample_index + self.accelerator.process_index
+        ) % len(self.val_dataset)
+        logger.info(
+            "Evaluating fixed sample index=%d (base=%d rank=%d).",
+            eval_index,
+            self.eval_sample_index,
+            self.accelerator.process_index,
+        )
+        sample = self._to_batched_eval_sample(self.val_dataset[eval_index])
 
         # 1. training loss
         with self.accelerator.autocast():
@@ -942,6 +1166,22 @@ class Wan22Trainer:
                                 description += " action_l2=%.4f" % metrics["action_l2"]
                             if "action_l1" in metrics:
                                 description += " action_l1=%.4f" % metrics["action_l1"]
+                            if "decoded_target_l2" in metrics:
+                                description += " decoded_target_l2=%.4f" % metrics[
+                                    "decoded_target_l2"
+                                ]
+                            if "decoded_target_l1" in metrics:
+                                description += " decoded_target_l1=%.4f" % metrics[
+                                    "decoded_target_l1"
+                                ]
+                            if "decoded_position_mae_m" in metrics:
+                                description += " pos_mae_m=%.4f" % metrics[
+                                    "decoded_position_mae_m"
+                                ]
+                            if "decoded_rotation_geodesic_deg" in metrics:
+                                description += " rot_deg=%.2f" % metrics[
+                                    "decoded_rotation_geodesic_deg"
+                                ]
                             logger.info(description)
                             eval_payload = {
                                 "eval/val_loss": float(metrics["val_loss"]),
@@ -956,6 +1196,23 @@ class Wan22Trainer:
                                 eval_payload["eval/action_l2"] = float(metrics["action_l2"])
                             if "action_l1" in metrics:
                                 eval_payload["eval/action_l1"] = float(metrics["action_l1"])
+                            if "decoded_target_l2" in metrics:
+                                eval_payload["eval/decoded_target_l2"] = float(
+                                    metrics["decoded_target_l2"]
+                                )
+                            if "decoded_target_l1" in metrics:
+                                eval_payload["eval/decoded_target_l1"] = float(
+                                    metrics["decoded_target_l1"]
+                                )
+                            for key in (
+                                "decoded_position_mae_m",
+                                "decoded_position_rmse_m",
+                                "decoded_rotation_geodesic_deg",
+                                "decoded_gripper_mae",
+                                "decoded_gripper_accuracy",
+                            ):
+                                if key in metrics:
+                                    eval_payload[f"eval/{key}"] = float(metrics[key])
                             self._wandb_log(eval_payload)
 
                     if self.save_every > 0 and self.global_step % self.save_every == 0:

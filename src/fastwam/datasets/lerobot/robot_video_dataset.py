@@ -15,9 +15,14 @@ from .robotwin_tasks import resolve_robotwin_episode_indices
 from .utils.normalizer import save_dataset_stats_to_json, load_dataset_stats_from_json
 from ..dataset_utils import ResizeSmallestSideAspectPreserving, CenterCrop, Normalize
 from ..robotwin_rgb import build_robotwin_rgb_canvas
+from ..libero_rgb import build_libero_rgb_canvas
 from fastwam.utils.logging_config import get_logger
 from fastwam.utils import misc, pytorch_utils
 from fastwam.representations.rothko import RothkoCodec, RothkoCodecConfig
+from fastwam.representations.libero_rothko import (
+    LiberoRothkoCodec,
+    LiberoRothkoCodecConfig,
+)
 from accelerate import PartialState
 logger = get_logger(__name__)
 
@@ -49,6 +54,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         raw_state_meta=None,
         raymap_representation: Optional[str] = None,
         rothko_norm_stats: Optional[str] = None,
+        sample_error_mode: str = "fallback",
     ):
         episode_indices = None
         if robotwin_task_names is not None:
@@ -92,12 +98,19 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         self.max_padding_retry = max_padding_retry
         self.concat_multi_camera = concat_multi_camera
         self.override_instruction = override_instruction
+        self.sample_error_mode = str(sample_error_mode)
+        if self.sample_error_mode not in {"fallback", "raise"}:
+            raise ValueError(
+                "`sample_error_mode` must be 'fallback' or 'raise', got "
+                f"{self.sample_error_mode!r}."
+            )
         self.raymap_representation = raymap_representation
         self.raymap_codec = None
         if raymap_representation is not None:
-            if raymap_representation != "rothko":
+            if raymap_representation not in ("rothko", "libero_rothko"):
                 raise ValueError(
-                    "Only raymap_representation='rothko' is implemented in the first version, "
+                    "`raymap_representation` must be one of "
+                    "['rothko', 'libero_rothko'], "
                     f"got {raymap_representation!r}."
                 )
             if action_video_freq_ratio != 1:
@@ -107,14 +120,27 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 )
             if rothko_norm_stats is None:
                 raise ValueError("`rothko_norm_stats` is required for Rothko training.")
-            codec_config = RothkoCodecConfig(
-                image_height=int(video_size[0]),
-                image_width=int(video_size[1]),
-            )
-            self.raymap_codec = RothkoCodec(
-                config=codec_config,
-                norm_stats=rothko_norm_stats,
-            )
+            if raymap_representation == "rothko":
+                codec_config = RothkoCodecConfig(
+                    image_height=int(video_size[0]),
+                    image_width=int(video_size[1]),
+                )
+                self.raymap_codec = RothkoCodec(
+                    config=codec_config,
+                    norm_stats=rothko_norm_stats,
+                )
+            else:
+                codec_config = LiberoRothkoCodecConfig(
+                    image_height=int(video_size[0]),
+                    image_width=int(video_size[1]),
+                    tile_height=int(video_size[0]),
+                    tile_width=int(video_size[1]) // 2,
+                )
+                self.raymap_codec = LiberoRothkoCodec(
+                    config=codec_config,
+                    norm_stats=rothko_norm_stats,
+                    expected_action_horizon=self.num_frames - 1,
+                )
 
         self.resize_transform = ResizeSmallestSideAspectPreserving(
             args={"img_w": self.video_size[1], "img_h": self.video_size[0]},
@@ -204,6 +230,18 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 left_wrist=video[1],
                 right_wrist=video[2],
             )
+        elif self.raymap_representation == "libero_rothko":
+            if num_cameras != 2 or self.concat_multi_camera != "horizontal":
+                raise ValueError(
+                    "LIBERO Rothko requires two horizontally concatenated cameras, "
+                    f"got num_cameras={num_cameras}, concat={self.concat_multi_camera!r}."
+                )
+            video = build_libero_rgb_canvas(
+                agentview=video[0],
+                wrist=video[1],
+                camera_height=int(self.video_size[0]),
+                camera_width=int(self.video_size[1]) // 2,
+            )
         elif num_cameras > 1:
             if self.concat_multi_camera == "horizontal":
                 video = torch.cat([video[i] for i in range(num_cameras)], dim=-1)  # [T_video, C, H, num_cameras*W]
@@ -217,7 +255,10 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         else:
             video = video.squeeze(0)  # [T_video, C, H, W]
 
-        if self.concat_multi_camera != "robotwin":
+        if (
+            self.concat_multi_camera != "robotwin"
+            and self.raymap_representation != "libero_rothko"
+        ):
             # The shared RoboTwin builder already returns the exact target
             # shape and applies the same [-1, 1] normalization.
             video = self.resize_transform(video)
@@ -258,38 +299,75 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         if self.raymap_codec is not None:
             raw_action = sample.get("raw_action") or {}
             raw_state = sample.get("raw_state") or {}
-            required_raw = {
-                "raw_action.default": raw_action.get("default"),
-                "raw_action.endpose": raw_action.get("endpose"),
-                "raw_state.default": raw_state.get("default"),
-                "raw_state.endpose": raw_state.get("endpose"),
-            }
+            if self.raymap_representation == "rothko":
+                required_raw = {
+                    "raw_action.default": raw_action.get("default"),
+                    "raw_action.endpose": raw_action.get("endpose"),
+                    "raw_state.default": raw_state.get("default"),
+                    "raw_state.endpose": raw_state.get("endpose"),
+                }
+            else:
+                required_raw = {
+                    "raw_action.default": raw_action.get("default"),
+                    "raw_action.osc_target_pose_wxyz": raw_action.get(
+                        "osc_target_pose_wxyz"
+                    ),
+                    "raw_state.ee_pose_wxyz": raw_state.get("ee_pose_wxyz"),
+                    "raw_state.gripper_open": raw_state.get("gripper_open"),
+                }
             missing = [name for name, value in required_raw.items() if value is None]
             if missing:
                 raise ValueError(
-                    "Rothko dataset is missing raw side-channel fields: "
+                    f"{self.raymap_representation} dataset is missing raw side-channel fields: "
                     + ", ".join(missing)
                 )
-            raw_action_qpos = raw_action["default"].float()
-            raw_state_qpos = raw_state["default"].float()
-            action_endpose = raw_action["endpose"].float()
-            state_endpose = raw_state["endpose"].float()
-            if action_endpose.shape != (self.num_frames - 1, 14):
-                raise ValueError(
-                    f"Expected action endpose {(self.num_frames - 1, 14)}, "
-                    f"got {tuple(action_endpose.shape)}."
-                )
-            if state_endpose.shape != (self.num_frames, 14):
-                raise ValueError(
-                    f"Expected state endpose {(self.num_frames, 14)}, "
-                    f"got {tuple(state_endpose.shape)}."
-                )
+            if self.raymap_representation == "rothko":
+                raw_action_qpos = raw_action["default"].float()
+                raw_state_qpos = raw_state["default"].float()
+                action_endpose = raw_action["endpose"].float()
+                state_endpose = raw_state["endpose"].float()
+                if action_endpose.shape != (self.num_frames - 1, 14):
+                    raise ValueError(
+                        f"Expected action endpose {(self.num_frames - 1, 14)}, "
+                        f"got {tuple(action_endpose.shape)}."
+                    )
+                if state_endpose.shape != (self.num_frames, 14):
+                    raise ValueError(
+                        f"Expected state endpose {(self.num_frames, 14)}, "
+                        f"got {tuple(state_endpose.shape)}."
+                    )
+                current_endpose = state_endpose[0]
+                future_endpose = action_endpose
+                current_gripper = raw_state_qpos[0, [6, 13]]
+                future_gripper = raw_action_qpos[:, [6, 13]]
+            else:
+                action_target = raw_action["osc_target_pose_wxyz"].float()
+                state_pose = raw_state["ee_pose_wxyz"].float()
+                state_gripper = raw_state["gripper_open"].float()
+                raw_action_default = raw_action["default"].float()
+                if action_target.shape != (self.num_frames - 1, 7):
+                    raise ValueError(
+                        "Expected LIBERO OSC target "
+                        f"{(self.num_frames - 1, 7)}, got {tuple(action_target.shape)}."
+                    )
+                if state_pose.shape != (self.num_frames, 7):
+                    raise ValueError(
+                        f"Expected LIBERO state pose {(self.num_frames, 7)}, "
+                        f"got {tuple(state_pose.shape)}."
+                    )
+                if state_gripper.shape != (self.num_frames, 1):
+                    raise ValueError(
+                        f"Expected LIBERO state gripper {(self.num_frames, 1)}, "
+                        f"got {tuple(state_gripper.shape)}."
+                    )
+                current_endpose = state_pose[0]
+                future_endpose = action_target
+                current_gripper = state_gripper[0]
+                future_gripper = raw_action_default[:, -1:].clamp(0, 1)
 
-            current_endpose = state_endpose[0]
-            future_endpose = action_endpose
-            pose_sequence = torch.cat((current_endpose.unsqueeze(0), future_endpose), dim=0)
-            current_gripper = raw_state_qpos[0, [6, 13]]
-            future_gripper = raw_action_qpos[:, [6, 13]]
+            pose_sequence = torch.cat(
+                (current_endpose.unsqueeze(0), future_endpose), dim=0
+            )
             gripper_sequence = torch.cat(
                 (current_gripper.unsqueeze(0), future_gripper), dim=0
             )
@@ -365,6 +443,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         try:
             data = self._get(idx)
         except Exception as e:
+            if self.sample_error_mode == "raise":
+                raise RuntimeError(f"Error processing sample idx {idx}") from e
             print(f"Error processing sample idx {idx}: {e}. Returning a random sample instead.")
             # trace back
             print(traceback.format_exc())

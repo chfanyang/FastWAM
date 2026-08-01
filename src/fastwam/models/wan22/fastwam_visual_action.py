@@ -11,6 +11,10 @@ from omegaconf import OmegaConf
 from PIL import Image
 
 from fastwam.representations.rothko import RothkoCodec, RothkoCodecConfig
+from fastwam.representations.libero_rothko import (
+    LiberoRothkoCodec,
+    LiberoRothkoCodecConfig,
+)
 from fastwam.utils.logging_config import get_logger
 
 from ..lora import (
@@ -30,13 +34,9 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
     """Wan video expert jointly predicting future RGB and Rothko raymaps.
 
     RGB and Rothko are independently encoded by the same frozen Wan VAE, then
-    concatenated as two latent-time blocks:
-
-        [RGB_0..4 | RAY_0..4]
-
-    The two frame-zero latents are clean conditions.  All eight future latent
-    frames are jointly denoised by a single pretrained Wan video DiT using
-    continuous temporal RoPE positions 0..9.
+    concatenated as two equally-sized latent-time blocks.  The two frame-zero
+    latents are clean conditions; all future latents are jointly denoised by a
+    single pretrained Wan video DiT using continuous temporal RoPE positions.
     """
     is_visual_action_model = True
     legacy_video_attention_mask_mode = "condition_frames_causal"
@@ -57,6 +57,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         loss_lambda_rgb: float = 1.0,
         loss_lambda_raymap: float = 1.0,
         action_horizon: int = 16,
+        raymap_representation: str = "rothko",
         rothko_norm_stats: Optional[str] = None,
         rothko_config: Optional[dict[str, Any]] = None,
     ):
@@ -78,26 +79,24 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             else None
         )
 
-        if int(action_horizon) != 16:
-            raise ValueError(
-                "The first video-only implementation is fixed to action_horizon=16, "
-                f"got {action_horizon}."
-            )
         self.action_horizon = int(action_horizon)
+        temporal_factor = int(self.vae.temporal_downsample_factor)
+        if self.action_horizon <= 0 or self.action_horizon % temporal_factor != 0:
+            raise ValueError(
+                "`action_horizon` must be a positive multiple of the VAE temporal "
+                f"downsample factor {temporal_factor}, got {self.action_horizon}."
+            )
         self.num_pixel_frames = self.action_horizon + 1
         self.num_latent_frames_per_modality = (
             self.num_pixel_frames - 1
-        ) // int(self.vae.temporal_downsample_factor) + 1
-        if self.num_latent_frames_per_modality != 5:
-            raise ValueError(
-                "Expected 17 pixels frames to produce 5 latent frames, got "
-                f"{self.num_latent_frames_per_modality}."
-            )
+        ) // temporal_factor + 1
         self.condition_latent_indices = (
             0,
             self.num_latent_frames_per_modality,
         )
-        self.temporal_rope_mode = "continuous_0_9"
+        self.temporal_rope_mode = (
+            f"continuous_0_{2 * self.num_latent_frames_per_modality - 1}"
+        )
 
         self.train_scheduler = WanContinuousFlowMatchScheduler(
             num_train_timesteps=num_train_timesteps,
@@ -110,11 +109,24 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         self.loss_lambda_rgb = float(loss_lambda_rgb)
         self.loss_lambda_raymap = float(loss_lambda_raymap)
 
+        self.raymap_representation = str(raymap_representation)
         codec_payload = {} if rothko_config is None else dict(rothko_config)
-        self.raymap_codec = RothkoCodec(
-            config=RothkoCodecConfig(**codec_payload),
-            norm_stats=rothko_norm_stats,
-        )
+        if self.raymap_representation == "rothko":
+            self.raymap_codec = RothkoCodec(
+                config=RothkoCodecConfig(**codec_payload),
+                norm_stats=rothko_norm_stats,
+            )
+        elif self.raymap_representation == "libero_rothko":
+            self.raymap_codec = LiberoRothkoCodec(
+                config=LiberoRothkoCodecConfig(**codec_payload),
+                norm_stats=rothko_norm_stats,
+                expected_action_horizon=self.action_horizon,
+            )
+        else:
+            raise ValueError(
+                "`raymap_representation` must be 'rothko' or 'libero_rothko', "
+                f"got {self.raymap_representation!r}."
+            )
         self.device = torch.device(device)
         self.torch_dtype = torch_dtype
         self.base_model_id: Optional[str] = None
@@ -142,6 +154,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         loss_lambda_rgb: float = 1.0,
         loss_lambda_raymap: float = 1.0,
         action_horizon: int = 16,
+        raymap_representation: str = "rothko",
         rothko_norm_stats: Optional[str] = None,
         rothko_config: Optional[dict[str, Any]] = None,
     ) -> "FastWAMVideoOnlyRaymap":
@@ -176,6 +189,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             loss_lambda_rgb=loss_lambda_rgb,
             loss_lambda_raymap=loss_lambda_raymap,
             action_horizon=action_horizon,
+            raymap_representation=raymap_representation,
             rothko_norm_stats=rothko_norm_stats,
             rothko_config=rothko_config,
         )
@@ -451,6 +465,9 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             + self.loss_lambda_raymap * loss_raymap
         )
         return total, {
+            "loss_total": float(total.detach()),
+            "loss_rgb_raw": float(loss_rgb.detach()),
+            "loss_raymap_raw": float(loss_raymap.detach()),
             "loss_rgb": self.loss_lambda_rgb * float(loss_rgb.detach()),
             "loss_raymap": self.loss_lambda_raymap * float(loss_raymap.detach()),
         }
@@ -465,7 +482,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         current_endpose: Optional[torch.Tensor] = None,
         context: Optional[torch.Tensor] = None,
         context_mask: Optional[torch.Tensor] = None,
-        num_frames: int = 17,
+        num_frames: Optional[int] = None,
         num_inference_steps: int = 20,
         sigma_shift: Optional[float] = None,
         seed: Optional[int] = None,
@@ -474,7 +491,9 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         **_: Any,
     ) -> dict[str, Any]:
         self.eval()
-        if num_frames != self.num_pixel_frames:
+        if num_frames is None:
+            num_frames = self.num_pixel_frames
+        if int(num_frames) != self.num_pixel_frames:
             raise ValueError(
                 f"Video-only inference requires num_frames={self.num_pixel_frames}."
             )
@@ -588,22 +607,26 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                     dtype=torch.float32,
                 ),
             )
-            ee_action = torch.cat(
-                (
-                    pose[:, 1:, :7],
-                    gripper[:, 1:, 0:1],
-                    pose[:, 1:, 7:14],
-                    gripper[:, 1:, 1:2],
-                ),
-                dim=-1,
-            )
             result.update(
                 {
                     "pose": pose.cpu(),
                     "gripper": gripper.cpu(),
-                    "action": ee_action.cpu(),
                 }
             )
+            if (
+                int(getattr(self.raymap_codec, "pose_dim", 14)) == 14
+                and int(getattr(self.raymap_codec, "gripper_dim", 2)) == 2
+            ):
+                ee_action = torch.cat(
+                    (
+                        pose[:, 1:, :7],
+                        gripper[:, 1:, 0:1],
+                        pose[:, 1:, 7:14],
+                        gripper[:, 1:, 1:2],
+                    ),
+                    dim=-1,
+                )
+                result["action"] = ee_action.cpu()
         return result
 
     @property
@@ -654,6 +677,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             )
         return {
             **self.raymap_codec.metadata(),
+            "raymap_representation": self.raymap_representation,
             "action_horizon": self.action_horizon,
             "latent_layout": "rgb_then_raymap",
             "temporal_rope_mode": self.temporal_rope_mode,
@@ -744,6 +768,17 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                     f"Checkpoint metadata mismatch for {key}: "
                     f"checkpoint={actual!r}, model={expected!r}."
                 )
+        checkpoint_representation = visual_config.get("raymap_representation")
+        if checkpoint_representation is None:
+            # Video-only checkpoints created before LIBERO support are
+            # unambiguously dual-arm RoboTwin Rothko checkpoints.
+            checkpoint_representation = "rothko"
+        if str(checkpoint_representation) != self.raymap_representation:
+            raise ValueError(
+                "Checkpoint raymap representation mismatch: "
+                f"checkpoint={checkpoint_representation!r}, "
+                f"model={self.raymap_representation!r}."
+            )
 
     def save_checkpoint(self, path, optimizer=None, step=None) -> None:
         payload: dict[str, Any] = {

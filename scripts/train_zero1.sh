@@ -110,6 +110,7 @@ echo "[launch] nproc_per_node=${NPROC_PER_NODE} num_machines=${NUM_MACHINES} mac
 accelerate launch \
   --config_file scripts/accelerate_configs/accelerate_zero1_ds.yaml \
   --num_processes "${NPROC_PER_NODE}" \
+  --main_process_port "${MAIN_PROCESS_PORT}" \
   scripts/train.py \
   "output_dir=./runs/${TASK_BASENAME}/${RUN_ID}" \
   "wandb.name=${TASK_BASENAME}" \

@@ -6,7 +6,7 @@ defaults:
   - _self_
 
 # dataloading
-batch_size: 16
+batch_size: 32
 num_workers: 8
 
 model:
@@ -15,7 +15,7 @@ model:
 # scheduler
 lr_scheduler_type: "cosine"
 learning_rate: 1e-4
-num_epochs: 10
+num_epochs: 4
 max_steps: null
 log_every: 10
 save_every: 2000

@@ -1,0 +1,5 @@
+defaults:
+  - fastwam_video_only_libero_rothko
+  - _self_
+
+action_horizon: 32

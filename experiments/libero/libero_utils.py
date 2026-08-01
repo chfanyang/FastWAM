@@ -13,7 +13,7 @@ from fastwam.utils.video_io import save_mp4
 
 DATE = time.strftime("%Y_%m_%d")
 DATE_TIME = time.strftime("%Y_%m_%d-%H_%M_%S")
-LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
+LIBERO_ENV_RESOLUTION = 256  # evaluation-environment render resolution
 
 
 def get_libero_env(task, resolution, seed, env_num=1):

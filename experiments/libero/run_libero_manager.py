@@ -1,6 +1,7 @@
 import os
 import shlex
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -66,9 +67,23 @@ def run_evaluation(
     num_gpus: int,
     num_trials: int,
     max_tasks_per_gpu: int,
+    worker_timeout_seconds: int,
     output_dir: Path,
     extra_overrides: list[str],
 ) -> None:
+    if num_gpus <= 0:
+        raise ValueError(f"num_gpus must be positive, got {num_gpus}.")
+    if num_trials <= 0:
+        raise ValueError(f"num_trials must be positive, got {num_trials}.")
+    if max_tasks_per_gpu <= 0:
+        raise ValueError(
+            f"max_tasks_per_gpu must be positive, got {max_tasks_per_gpu}."
+        )
+    if worker_timeout_seconds <= 0:
+        raise ValueError(
+            "worker_timeout_seconds must be positive, got "
+            f"{worker_timeout_seconds}."
+        )
     script_path = Path("experiments/libero/run_libero_parallel_test.sh")
     if not script_path.exists():
         raise FileNotFoundError(f"Evaluation script not found: {script_path}")
@@ -86,11 +101,13 @@ def run_evaluation(
             "NUM_GPUS": str(num_gpus),
             "NUM_TRIALS": str(num_trials),
             "MAX_TASKS_PER_GPU": str(max_tasks_per_gpu),
+            "WORKER_TIMEOUT_SECONDS": str(worker_timeout_seconds),
             "ROOT_DIR": root_dir,
             "RUN_ID": run_id,
             "OUTPUT_DIR": str(output_dir),
             "EXTRA_ARGS": extra_args,
             "EXP_NAME": os.environ.get("EXP_NAME", ""),
+            "PYTHON_EXECUTABLE": sys.executable,
         }
     )
 
@@ -100,6 +117,7 @@ def run_evaluation(
     print(f"Number of GPUs: {num_gpus}")
     print(f"Trials per task: {num_trials}")
     print(f"Max tasks per GPU: {max_tasks_per_gpu}")
+    print(f"Worker timeout: {worker_timeout_seconds} seconds")
     print(f"Output directory: {output_dir}")
     if extra_args:
         print(f"Forwarded overrides: {extra_args}")
@@ -154,6 +172,7 @@ def main(cfg: DictConfig):
         num_gpus=int(manager.num_gpus),
         num_trials=int(cfg.EVALUATION.num_trials),
         max_tasks_per_gpu=int(manager.max_tasks_per_gpu),
+        worker_timeout_seconds=int(manager.worker_timeout_seconds),
         output_dir=output_dir,
         extra_overrides=collect_worker_overrides(),
     )

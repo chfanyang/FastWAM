@@ -1,0 +1,8 @@
+defaults:
+  - libero_rothko_2cam224
+  - _self_
+
+# One current frame followed by 32 continuous future frames/actions.
+train:
+  num_frames: 33
+  rothko_norm_stats: ./data/libero_mujoco3.3.2/libero_rothko_region_symmetric_q99p95_h32_224x448.pt
