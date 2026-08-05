@@ -3,6 +3,7 @@
 import math
 import time
 import pathlib
+import re
 
 import imageio
 from PIL import Image, ImageDraw
@@ -14,6 +15,24 @@ from fastwam.utils.video_io import save_mp4
 DATE = time.strftime("%Y_%m_%d")
 DATE_TIME = time.strftime("%Y_%m_%d-%H_%M_%S")
 LIBERO_ENV_RESOLUTION = 256  # evaluation-environment render resolution
+
+
+def sanitize_task_name(task_description: str, max_length: int = 80) -> str:
+    """Return a compact, filesystem-safe task identifier."""
+    normalized = re.sub(r"[^a-z0-9]+", "_", task_description.strip().lower())
+    normalized = normalized.strip("_")
+    return (normalized or "unnamed_task")[:max_length].rstrip("_")
+
+
+def evaluation_video_stem(
+    task_description: str,
+    trial_id: str,
+    success: bool,
+) -> str:
+    return (
+        f"{sanitize_task_name(task_description)}"
+        f"--{trial_id}--success={bool(success)}"
+    )
 
 
 def get_libero_env(task, resolution, seed, env_num=1):
@@ -58,8 +77,9 @@ def get_libero_image(obs):
 
 def save_rollout_video(rollout_dir, rollout_images, idx, success, task_description, log_file=None, fps=24):
     """Saves an MP4 replay of an episode."""
-    processed_task_description = task_description.lower().replace(" ", "_").replace("\n", "_").replace(".", "_")[:50]
-    mp4_path = f"{rollout_dir}/{DATE_TIME}--episode={idx}--success={success}--task={processed_task_description}.mp4"
+    mp4_path = pathlib.Path(rollout_dir) / (
+        evaluation_video_stem(task_description, str(idx), bool(success)) + ".mp4"
+    )
     video_writer = imageio.get_writer(mp4_path, fps=fps)
     for img in rollout_images:
         if isinstance(img, dict):
@@ -80,7 +100,38 @@ def save_rollout_video(rollout_dir, rollout_images, idx, success, task_descripti
     print(f"Saved rollout MP4 at path {mp4_path}")
     if log_file is not None:
         log_file.write(f"Saved rollout MP4 at path {mp4_path}\n")
-    return mp4_path
+    return str(mp4_path)
+
+
+def save_model_prediction_video(
+    rollout_dir,
+    frames,
+    idx,
+    replan_idx,
+    modality,
+    success,
+    task_description,
+    log_file=None,
+    fps=8,
+):
+    """Save a pure model prediction clip for RGB or Rothko frames."""
+    if not frames:
+        raise ValueError(f"Cannot save an empty predicted {modality} video.")
+    if modality not in {"rgb", "rothko"}:
+        raise ValueError(f"Unsupported prediction modality: {modality!r}")
+    stem = evaluation_video_stem(task_description, str(idx), bool(success))
+    output_dir = pathlib.Path(rollout_dir) / stem
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if replan_idx == "all":
+        filename = f"all--{modality}.mp4"
+    else:
+        filename = f"replan{int(replan_idx):04d}--{modality}.mp4"
+    mp4_path = output_dir / filename
+    save_mp4(frames, str(mp4_path), fps=fps)
+    print(f"Saved predicted {modality} MP4 at path {mp4_path}")
+    if log_file is not None:
+        log_file.write(f"Saved predicted {modality} MP4 at path {mp4_path}\n")
+    return str(mp4_path)
 
 
 def save_prediction_video(
@@ -94,7 +145,12 @@ def save_prediction_video(
     log_file=None,
     fps=8,
 ):
-    """Saves an MP4 comparison of ground-truth and predicted future frames for one replanning clip."""
+    """Compare predicted RGB with the realized online rollout observations.
+
+    ``gt_frames`` is retained as an API name for compatibility; these frames
+    are not expert demonstrations. They are observations captured after the
+    policy's predicted actions are executed in the evaluation environment.
+    """
     num_frames = min(len(gt_frames), len(pred_frames))
     if num_frames <= 0:
         raise ValueError("Cannot save prediction video with empty GT/pred frame lists.")
@@ -124,27 +180,26 @@ def save_prediction_video(
             )
 
         gt_pil = Image.fromarray(gt_image)
-        ImageDraw.Draw(gt_pil).text((10, 10), "gt", fill=(255, 255, 255))
+        ImageDraw.Draw(gt_pil).text((10, 10), "rollout", fill=(255, 255, 255))
         pred_pil = Image.fromarray(pred_image)
         ImageDraw.Draw(pred_pil).text((10, 10), "pred", fill=(255, 255, 255))
         stitched_frames.append(
             Image.fromarray(np.concatenate([np.array(pred_pil), np.array(gt_pil)], axis=0))
         )
 
-    processed_task_description = task_description.lower().replace(" ", "_").replace("\n", "_").replace(".", "_")[:50]
-    try:
-        replan_tag = f"{int(replan_idx):04d}"
-    except (TypeError, ValueError):
-        replan_tag = str(replan_idx)
-    mp4_path = (
-        f"{rollout_dir}/{DATE_TIME}--episode={idx}--success={success}"
-        f"--task={processed_task_description}--replan={replan_tag}--gt-pred.mp4"
-    )
-    save_mp4(stitched_frames, mp4_path, fps=fps)
+    stem = evaluation_video_stem(task_description, str(idx), bool(success))
+    output_dir = pathlib.Path(rollout_dir) / stem
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if replan_idx == "all":
+        filename = "all--rgb_pred_vs_rollout.mp4"
+    else:
+        filename = f"replan{int(replan_idx):04d}--rgb_pred_vs_rollout.mp4"
+    mp4_path = output_dir / filename
+    save_mp4(stitched_frames, str(mp4_path), fps=fps)
     print(f"Saved predicted future comparison MP4 at path {mp4_path}")
     if log_file is not None:
         log_file.write(f"Saved predicted future comparison MP4 at path {mp4_path}\n")
-    return mp4_path
+    return str(mp4_path)
 
 def binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
     arr = np.asarray(open_val, dtype=np.float32).reshape(-1)

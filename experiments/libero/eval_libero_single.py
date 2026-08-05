@@ -32,6 +32,7 @@ from experiments.libero.libero_utils import (
     get_libero_image,
     invert_gripper_action,
     quat2axisangle,
+    save_model_prediction_video,
     save_prediction_video,
     save_rollout_video,
 )
@@ -43,7 +44,6 @@ from fastwam.representations.libero_osc import (
 )
 from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
 from fastwam.utils.pytorch_utils import set_global_seed
-from fastwam.utils.video_io import save_mp4
 from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
 from libero.libero import benchmark
 
@@ -386,9 +386,13 @@ def _repeat_initial_states(initial_states: Any, num_trials: int) -> list[Any]:
 
 
 def _record_prediction_videos(cfg: DictConfig) -> bool:
+    configured = cfg.EVALUATION.get("save_prediction_videos", None)
+    save_predictions = (
+        _is_libero_rothko(cfg) if configured is None else bool(configured)
+    )
     return bool(
         cfg.EVALUATION.get("visualize_future_video", False)
-        or cfg.EVALUATION.get("save_prediction_videos", False)
+        or save_predictions
     )
 
 
@@ -442,7 +446,7 @@ def _compute_clip_mean_psnr(
     if len(gt_frames) == 0 or len(pred_frames) == 0:
         return None
     assert len(gt_frames) == len(pred_frames), (
-        "GT/pred frame count mismatch for PSNR: "
+        "Rollout/pred frame count mismatch for PSNR: "
         f"len(gt_frames)={len(gt_frames)} len(pred_frames)={len(pred_frames)}. "
         "This indicates temporal misalignment in future-video capture."
     )
@@ -753,7 +757,7 @@ def run_single_episode(
                 gt_len = len(current_predicted_future_clip["gt_frames"])
                 pred_len = len(current_predicted_future_clip["pred_frames"])
                 assert gt_len == expected_frame_count, (
-                    "GT future frames do not match expected capture count: "
+                    "Rollout future frames do not match expected capture count: "
                     f"gt_len={gt_len} expected={expected_frame_count} "
                     f"episode={episode_idx} replan={current_predicted_future_clip['replan_idx']} "
                     f"current_replan_step={current_replan_step} capture_steps={sorted(capture_steps)}."
@@ -783,7 +787,7 @@ def run_single_episode(
                 assert len(current_predicted_future_clip["gt_frames"]) == len(
                     current_predicted_future_clip["pred_frames"]
                 ), (
-                    "GT/pred frame count mismatch after alignment: "
+                    "Rollout/pred frame count mismatch after alignment: "
                     f"len(gt_frames)={len(current_predicted_future_clip['gt_frames'])} "
                     f"len(pred_frames)={len(current_predicted_future_clip['pred_frames'])} "
                     f"episode={episode_idx} replan={current_predicted_future_clip['replan_idx']}."
@@ -900,25 +904,13 @@ def run_single_task(
             else:
                 all_gt_frames = []
                 all_pred_frames = []
+                all_pred_raymap_frames = []
                 for clip in predicted_future_video_clips:
                     all_gt_frames.extend(clip["gt_frames"])
                     all_pred_frames.extend(clip["pred_frames"])
-                    save_prediction_video(
-                        predicted_video_dir,
-                        clip["gt_frames"],
-                        clip["pred_frames"],
-                        f"task{cfg.EVALUATION.task_id}_trial{trial_idx}",
-                        clip["replan_idx"],
-                        success=success,
-                        task_description=task_description,
-                    )
                     raymap_frames = clip.get("pred_raymap_frames")
                     if raymap_frames:
-                        raymap_path = predicted_video_dir / (
-                            f"task{cfg.EVALUATION.task_id}_trial{trial_idx}"
-                            f"_replan{int(clip['replan_idx']):04d}_raymap.mp4"
-                        )
-                        save_mp4(raymap_frames, str(raymap_path), fps=8)
+                        all_pred_raymap_frames.extend(raymap_frames)
                 save_prediction_video(
                     predicted_video_dir,
                     all_gt_frames,
@@ -928,6 +920,16 @@ def run_single_task(
                     success=success,
                     task_description=task_description,
                 )
+                if all_pred_raymap_frames:
+                    save_model_prediction_video(
+                        predicted_video_dir,
+                        all_pred_raymap_frames,
+                        f"task{cfg.EVALUATION.task_id}_trial{trial_idx}",
+                        "all",
+                        "rothko",
+                        success=success,
+                        task_description=task_description,
+                    )
 
     if visualize_future_video:
         valid_episode_psnr = [x for x in results["episode_future_video_psnr"] if x is not None]
