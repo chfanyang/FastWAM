@@ -48,9 +48,9 @@ from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
 from libero.libero import benchmark
 
 try:
-    from .action_ensembler import ActionEnsembler
+    from .action_ensembler import ActionEnsembler, AbsolutePoseActionEnsembler
 except ImportError:  # Direct execution: python experiments/libero/eval_libero_single.py
-    from action_ensembler import ActionEnsembler
+    from action_ensembler import ActionEnsembler, AbsolutePoseActionEnsembler
 
 OmegaConf.register_new_resolver("eval", eval)
 OmegaConf.register_new_resolver("max", lambda x: max(x))
@@ -632,7 +632,12 @@ def run_single_episode(
     env.reset()
     obs = env.set_init_state(initial_state)
     if use_action_ensembler:
-        ensembler = ActionEnsembler()
+        if _is_libero_rothko(cfg):
+            ensembler = AbsolutePoseActionEnsembler(
+                decay=float(cfg.EVALUATION.get("action_ensemble_decay", 0.01))
+            )
+        else:
+            ensembler = ActionEnsembler()
         ensembler.reset()
 
     replay_images = []
@@ -682,16 +687,21 @@ def run_single_episode(
                 current_predicted_future_clip = None
             current_replan_step = 0
             if isinstance(action_chunk, dict):
-                if use_action_ensembler:
-                    raise ValueError(
-                        "ActionEnsembler is not defined for absolute LIBERO Rothko targets."
-                    )
                 target_pose = action_chunk["target_pose"]
                 gripper_open = action_chunk["gripper_open"]
-                pending_actions = [
-                    (target_pose[index], gripper_open[index], index)
-                    for index in range(min(replan_steps, len(target_pose)))
-                ]
+                num_pending_actions = min(replan_steps, len(target_pose))
+                if use_action_ensembler:
+                    ensembler.add_actions(target_pose, gripper_open, t)
+                    pending_actions = [
+                        (*ensembler.get_action(t + index), index)
+                        for index in range(num_pending_actions)
+                    ]
+                    ensembler.cleanup(t)
+                else:
+                    pending_actions = [
+                        (target_pose[index], gripper_open[index], index)
+                        for index in range(num_pending_actions)
+                    ]
             elif use_action_ensembler:
                 ensembler.add_actions(action_chunk, t)
                 pending_actions = [ensembler.get_action(ts).tolist() for ts in range(t, t + replan_steps)]
@@ -839,6 +849,9 @@ def run_single_task(
     model_device: str,
 ) -> dict:
     env, task_description = get_libero_env(task, LIBERO_ENV_RESOLUTION, cfg.get("seed"))
+    model_prompt = DEFAULT_PROMPT.format(task=task_description)
+    logging.info("LIBERO task language: %s", task_description)
+    logging.info("LIBERO model prompt: %s", model_prompt)
     visualize_future_video = _record_prediction_videos(cfg)
     results = {
         "successes": 0,
@@ -972,6 +985,8 @@ def eval_single_process(cfg: DictConfig):
     model = model.to(model_device).eval()
 
     dataset_stats_path = _resolve_dataset_stats_path(cfg)
+    if hasattr(model, "validate_dataset_stats"):
+        model.validate_dataset_stats(dataset_stats_path)
     dataset_stats = load_dataset_stats_from_json(str(dataset_stats_path))
     processor: FastWAMProcessor = instantiate(cfg.data.train.processor).eval()
     processor.set_normalizer_from_stats(dataset_stats)
@@ -1030,6 +1045,12 @@ def eval_single_process(cfg: DictConfig):
         model_device=model_device,
     )
     results.update(task_results)
+    # Keep both the raw LIBERO instruction and the exact text passed to the
+    # model in every per-task result file. All trials and replans for one task
+    # share these strings.
+    task_description = str(results["task_description"])
+    results["language"] = task_description
+    results["model_prompt"] = DEFAULT_PROMPT.format(task=task_description)
 
     results["duration"] = time.time() - start_time
     output_dir = Path(cfg.EVALUATION.output_dir) / cfg.EVALUATION.task_suite_name

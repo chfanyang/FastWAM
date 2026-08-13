@@ -5,6 +5,11 @@ from collections import defaultdict
 import pandas as pd
 import math
 
+MODEL_PROMPT_TEMPLATE = (
+    "A video recorded from a robot's point of view executing the following "
+    "instruction: {task}"
+)
+
 def format_time(seconds):
     """Format seconds as a human-readable duration string.
 
@@ -59,8 +64,23 @@ def summarize_results(output_dir):
             if not filename.startswith('gpu') or not filename.endswith('_results.json'):
                 continue
                 
-            with open(os.path.join(suite_dir, filename), 'r') as f:
+            result_path = os.path.join(suite_dir, filename)
+            with open(result_path, 'r') as f:
                 result = json.load(f)
+
+            # Backfill workers started before language metadata was added to
+            # eval_libero_single.py. New workers already write these fields.
+            language = result.get('task_description', '')
+            metadata_changed = False
+            if 'language' not in result:
+                result['language'] = language
+                metadata_changed = True
+            if 'model_prompt' not in result:
+                result['model_prompt'] = MODEL_PROMPT_TEMPLATE.format(task=language)
+                metadata_changed = True
+            if metadata_changed:
+                with open(result_path, 'w') as f:
+                    json.dump(result, f, indent=4)
             
             # Extract task ID from the filename
             parts = filename.split('_')

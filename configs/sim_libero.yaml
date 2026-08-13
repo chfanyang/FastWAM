@@ -25,6 +25,8 @@ EVALUATION:
   replan_steps: 10
   binarize_gripper: true
   use_action_ensembler: false
+  # Newer overlapping action chunks receive exp(-decay * age) weight.
+  action_ensemble_decay: 0.01
   visualize_future_video: false
   # null = automatically save RGB/Rothko predictions for visual-action
   # checkpoints while keeping legacy action-expert evaluation disabled.
