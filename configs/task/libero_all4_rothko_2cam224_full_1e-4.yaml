@@ -19,7 +19,7 @@ learning_rate: 1.0e-4
 num_epochs: 10
 max_steps: null
 log_every: 10
-save_every: 700
+save_every: 4000
 eval_every: 500
 eval_num_inference_steps: 20
 eval_sample_index: 0
