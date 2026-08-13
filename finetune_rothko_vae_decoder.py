@@ -682,6 +682,44 @@ def sample_random_windows(
     return windows
 
 
+def sample_uniform_windows_per_episode(
+    store: EpisodeStore,
+    episode_pool: Sequence[EpisodeRef],
+    windows_per_episode: int,
+    horizon: int,
+) -> list[ActionWindow]:
+    """Select fixed, uniformly spaced windows from every validation episode.
+
+    Unlike the legacy global random sampler, this guarantees coverage of every
+    held-out episode (and therefore every task represented by the stratified
+    episode split).  The selected starts include the beginning and end of each
+    episode whenever at least two windows are requested.
+    """
+    refs: list[WindowRef] = []
+    ordered_episodes = sorted(
+        episode_pool,
+        key=lambda episode: (
+            episode.dataset_root,
+            episode.task,
+            episode.episode_index,
+        ),
+    )
+    for episode in ordered_episodes:
+        valid = episode.length - horizon + 1
+        if valid <= 0:
+            continue
+        if valid <= windows_per_episode:
+            starts = np.arange(valid, dtype=np.int64)
+        else:
+            starts = np.rint(
+                np.linspace(0, valid - 1, windows_per_episode)
+            ).astype(np.int64)
+        refs.extend(WindowRef(episode, int(start)) for start in np.unique(starts))
+    if not refs:
+        raise RuntimeError("No valid uniformly sampled validation windows were found")
+    return materialize_windows(store, refs, horizon)
+
+
 def build_target_batch(
     windows: Sequence[ActionWindow],
     stats: RothkoNormStats,
@@ -941,9 +979,25 @@ def evaluate(
 ) -> dict[str, Any]:
     vae.model.decoder.eval()
     vae.model.conv2.eval()
-    windows = sample_random_windows(
-        store, eval_episodes, args.eval_windows, args.action_horizon, args.eval_seed
-    )
+    if args.eval_sampling == "uniform_per_episode":
+        windows = sample_uniform_windows_per_episode(
+            store,
+            eval_episodes,
+            args.eval_windows_per_episode,
+            args.action_horizon,
+        )
+    else:
+        windows = sample_random_windows(
+            store, eval_episodes, args.eval_windows, args.action_horizon, args.eval_seed
+        )
+    windows_per_task: dict[str, int] = defaultdict(int)
+    for window in windows:
+        dataset_name = Path(window.episode.dataset_root).name
+        suite_name = next(
+            (suite for suite, directory in SUITE_DIRS.items() if directory == dataset_name),
+            dataset_name,
+        )
+        windows_per_task[f"{suite_name}/{window.episode.task}"] += 1
     masks = build_loss_masks(args, device)
     totals = defaultdict(float)
     maxima = defaultdict(float)
@@ -991,6 +1045,10 @@ def evaluate(
         "future_gripper_mae": totals["future_gripper_mae"] / totals["future_element_count"],
         **maxima,
         "num_windows": count,
+        "num_eval_episodes": len(eval_episodes),
+        "num_eval_tasks": len(windows_per_task),
+        "eval_sampling": args.eval_sampling,
+        "windows_per_task": dict(sorted(windows_per_task.items())),
     }
     vae.model.decoder.train()
     vae.model.conv2.train()
@@ -1423,6 +1481,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--eval-every", type=int, default=250)
     parser.add_argument("--eval-windows", type=int, default=200)
+    parser.add_argument(
+        "--eval-sampling",
+        choices=("random", "uniform_per_episode"),
+        default="random",
+        help=(
+            "Validation window selection. `random` preserves the legacy global "
+            "sampler; `uniform_per_episode` deterministically covers every held-out "
+            "episode."
+        ),
+    )
+    parser.add_argument(
+        "--eval-windows-per-episode",
+        type=int,
+        default=None,
+        help="Uniformly spaced validation windows per episode.",
+    )
     parser.add_argument("--eval-batch-size", type=int, default=4)
     parser.add_argument("--eval-seed", type=int, default=12_345)
     parser.add_argument("--save-every", type=int, default=500)
@@ -1504,6 +1578,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("Batch/step/eval/save arguments must be positive")
     if args.eval_episodes_per_task < 1:
         parser.error("--eval-episodes-per-task must be positive")
+    if args.eval_sampling == "uniform_per_episode":
+        if args.eval_windows_per_episode is None or args.eval_windows_per_episode < 1:
+            parser.error(
+                "--eval-windows-per-episode must be positive when "
+                "--eval-sampling=uniform_per_episode"
+            )
     if args.save_step_checkpoints and args.step_checkpoint_every % args.save_every != 0:
         parser.error("--step-checkpoint-every must be divisible by --save-every")
     if args.export_every % args.save_every != 0:
