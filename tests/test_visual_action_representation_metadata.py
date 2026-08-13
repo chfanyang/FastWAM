@@ -26,7 +26,12 @@ def _stats(height: int, width: int, metadata: dict) -> RothkoNormStats:
 
 class VisualActionRepresentationMetadataTest(unittest.TestCase):
     def _model(
-        self, representation: str, action_horizon: int = 16
+        self,
+        representation: str,
+        action_horizon: int = 16,
+        *,
+        center_frac: float = 0.5,
+        stats_offset: float = 0.0,
     ) -> FastWAMVideoOnlyRaymap:
         if representation == "rothko":
             stats = _stats(384, 320, {})
@@ -45,7 +50,11 @@ class VisualActionRepresentationMetadataTest(unittest.TestCase):
                 "image_width": 448,
                 "tile_height": 224,
                 "tile_width": 224,
+                "center_frac": center_frac,
             }
+        if stats_offset:
+            stats.lo = stats.lo + stats_offset
+            stats.hi = stats.hi + stats_offset
         return FastWAMVideoOnlyRaymap(
             video_expert=_DummyVideoExpert(),
             vae=_DummyVae(),
@@ -95,6 +104,43 @@ class VisualActionRepresentationMetadataTest(unittest.TestCase):
     def test_horizon_must_align_with_vae_temporal_factor(self) -> None:
         with self.assertRaisesRegex(ValueError, "positive multiple"):
             self._model("libero_rothko", action_horizon=18)
+
+    def test_checkpoint_rejects_codec_geometry_drift(self) -> None:
+        trained = self._model("libero_rothko", center_frac=0.5)
+        checkpoint_config = trained._visual_action_checkpoint_config()
+        changed = self._model("libero_rothko", center_frac=0.6)
+        with self.assertRaisesRegex(ValueError, "codec mismatch for center_frac"):
+            changed._validate_visual_action_checkpoint_config(
+                checkpoint_config, checkpoint_path="/tmp/geometry_drift.pt"
+            )
+
+    def test_checkpoint_rejects_norm_stats_content_drift(self) -> None:
+        trained = self._model("libero_rothko")
+        checkpoint_config = trained._visual_action_checkpoint_config()
+        changed = self._model("libero_rothko", stats_offset=0.1)
+        with self.assertRaisesRegex(ValueError, "normalization stats mismatch"):
+            changed._validate_visual_action_checkpoint_config(
+                checkpoint_config, checkpoint_path="/tmp/stats_drift.pt"
+            )
+
+    def test_checkpoint_rejects_vae_content_drift(self) -> None:
+        trained = self._model("libero_rothko")
+        trained._vae_identity_cache = {
+            "kind": "original_wan22",
+            "filename": "Wan2.2_VAE.safetensors",
+            "sha256": "trained",
+        }
+        checkpoint_config = trained._visual_action_checkpoint_config()
+        changed = self._model("libero_rothko")
+        changed._vae_identity_cache = {
+            "kind": "custom",
+            "filename": "custom.safetensors",
+            "sha256": "changed",
+        }
+        with self.assertRaisesRegex(ValueError, "Checkpoint VAE mismatch"):
+            changed._validate_visual_action_checkpoint_config(
+                checkpoint_config, checkpoint_path="/tmp/vae_drift.pt"
+            )
 
 
 if __name__ == "__main__":

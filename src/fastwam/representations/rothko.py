@@ -14,6 +14,7 @@ Quaternions use the RoboTwin convention ``wxyz`` throughout.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -62,16 +63,54 @@ class RothkoNormStats:
     hi: torch.Tensor
     metadata: dict[str, Any]
 
+    def __post_init__(self) -> None:
+        self.lo = torch.as_tensor(self.lo, dtype=torch.float32).contiguous()
+        self.hi = torch.as_tensor(self.hi, dtype=torch.float32).contiguous()
+        if self.lo.shape != self.hi.shape:
+            raise ValueError(
+                "Rothko normalization lo/hi shape mismatch: "
+                f"{tuple(self.lo.shape)} vs {tuple(self.hi.shape)}."
+            )
+        if self.lo.ndim != 4 or self.lo.shape[0] != 1 or self.lo.shape[1] != 3:
+            raise ValueError(
+                "Rothko normalization tensors must have shape [1,3,H,W], got "
+                f"{tuple(self.lo.shape)}."
+            )
+        if not torch.isfinite(self.lo).all() or not torch.isfinite(self.hi).all():
+            raise ValueError("Rothko normalization tensors contain NaN or Inf.")
+        if not torch.all(self.hi > self.lo):
+            invalid = int((self.hi <= self.lo).sum())
+            raise ValueError(
+                "Rothko normalization requires hi > lo at every pixel; "
+                f"found {invalid} invalid values."
+            )
+
+    def fingerprint(self) -> str:
+        """Content identity independent of the stats filename and metadata paths."""
+        digest = hashlib.sha256()
+        for name, tensor in (("lo", self.lo), ("hi", self.hi)):
+            value = tensor.detach().cpu().to(torch.float32).contiguous()
+            digest.update(name.encode("ascii"))
+            digest.update(str(tuple(value.shape)).encode("ascii"))
+            digest.update(value.numpy().tobytes(order="C"))
+        return digest.hexdigest()
+
     @classmethod
     def load(cls, path: str | Path) -> "RothkoNormStats":
         payload = torch.load(path, map_location="cpu", weights_only=False)
         if not isinstance(payload, dict) or "lo" not in payload or "hi" not in payload:
             raise ValueError(f"Invalid Rothko normalization checkpoint: {path}")
-        return cls(
+        result = cls(
             lo=torch.as_tensor(payload["lo"], dtype=torch.float32),
             hi=torch.as_tensor(payload["hi"], dtype=torch.float32),
             metadata=dict(payload.get("metadata") or {}),
         )
+        version = result.metadata.get("stats_format_version")
+        if version is not None and int(version) > 2:
+            raise ValueError(
+                f"Unsupported Rothko stats format version {version} in {path}."
+            )
+        return result
 
 
 def quaternion_wxyz_to_matrix(quaternion: torch.Tensor) -> torch.Tensor:
@@ -187,6 +226,12 @@ class RothkoCodec:
             norm_stats = RothkoNormStats.load(norm_stats)
         self.norm_stats = norm_stats
         if self.norm_stats is not None:
+            expected_shape = (1, 3, self.config.image_height, self.config.image_width)
+            if tuple(self.norm_stats.lo.shape) != expected_shape:
+                raise ValueError(
+                    "Rothko stats tensor shape mismatch: "
+                    f"stats={tuple(self.norm_stats.lo.shape)} codec={expected_shape}."
+                )
             self._validate_stats_metadata(self.norm_stats.metadata)
 
     def metadata(self) -> dict[str, Any]:
@@ -199,16 +244,34 @@ class RothkoCodec:
 
     def _validate_stats_metadata(self, metadata: dict[str, Any]) -> None:
         expected = {
+            "representation": "rothko",
+            "active_shape": [self.config.image_height, self.config.image_width],
             "focal": self.config.focal,
             "center_scale": self.config.center_scale,
             "dir_scale": self.config.dir_scale,
             "center_frac": self.config.center_frac,
+            "boundary_margin": self.config.boundary_margin,
+            "outer_margin": self.config.outer_margin,
+            "duplicate_vertical": self.config.duplicate_vertical,
         }
+        strict = int(metadata.get("stats_format_version", 1)) >= 2
         for key, value in expected.items():
-            if key in metadata and abs(float(metadata[key]) - float(value)) > 1e-8:
+            if key not in metadata:
+                if strict:
+                    raise ValueError(
+                        f"Rothko stats v2 metadata is missing required key {key!r}."
+                    )
+                continue
+            actual = metadata[key]
+            matches = (
+                abs(float(actual) - float(value)) <= 1e-8
+                if isinstance(value, float)
+                else actual == value
+            )
+            if not matches:
                 raise ValueError(
                     f"Rothko stats metadata mismatch for {key}: "
-                    f"stats={metadata[key]} codec={value}"
+                    f"stats={actual!r} codec={value!r}"
                 )
 
     @staticmethod

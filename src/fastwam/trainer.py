@@ -1,5 +1,6 @@
 import logging
 import json
+import hashlib
 import inspect
 import os
 import random
@@ -999,9 +1000,81 @@ class Wan22Trainer:
             "global_step": int(self.global_step),
             "epoch": int(self.epoch),
             "batch_in_epoch": int(self.batch_in_epoch),
+            "resume_compatibility": self._resume_compatibility_manifest(),
         }
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=True, indent=2)
+
+    def _resume_compatibility_manifest(self) -> dict[str, object]:
+        """Describe stateful training semantics; operational knobs are omitted."""
+        cfg = OmegaConf.to_container(self.cfg, resolve=True)
+        assert isinstance(cfg, dict)
+        semantic = {
+            "model": cfg.get("model"),
+            "data": cfg.get("data"),
+            "batch_size": self.batch_size,
+            "gradient_accumulation_steps": self.gradient_accumulation_steps,
+            "mixed_precision": self.mixed_precision,
+            "seed": self.seed,
+            "learning_rate": self.learning_rate,
+            "weight_decay": self.weight_decay,
+            "lr_scheduler_type": cfg.get("lr_scheduler_type"),
+            "max_grad_norm": self.max_grad_norm,
+            "num_epochs": self.num_epochs,
+            "max_steps": self.max_steps,
+            "finetune": cfg.get("finetune"),
+            "world_size": int(self.accelerator.num_processes),
+        }
+        encoded = json.dumps(
+            semantic,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+        return {
+            "format_version": 1,
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "semantic_config": semantic,
+        }
+
+    def _validate_resume_compatibility(self, saved: object, state_dir: str) -> None:
+        if not isinstance(saved, dict) or "sha256" not in saved:
+            logger.warning(
+                "Training state %s predates resume compatibility metadata; "
+                "optimizer/dataloader state will be restored without semantic "
+                "configuration authentication.",
+                state_dir,
+            )
+            return
+        current = self._resume_compatibility_manifest()
+        if saved.get("sha256") == current["sha256"]:
+            return
+        if bool(self.cfg.get("resume_allow_config_mismatch", False)):
+            logger.warning(
+                "Resume semantic configuration mismatch was explicitly allowed: "
+                "saved=%s current=%s state=%s",
+                saved.get("sha256"),
+                current["sha256"],
+                state_dir,
+            )
+            return
+        saved_semantic = saved.get("semantic_config")
+        current_semantic = current["semantic_config"]
+        changed = []
+        if isinstance(saved_semantic, dict) and isinstance(current_semantic, dict):
+            changed = sorted(
+                key
+                for key in set(saved_semantic) | set(current_semantic)
+                if saved_semantic.get(key) != current_semantic.get(key)
+            )
+        raise ValueError(
+            "Refusing incompatible training-state resume. "
+            f"Changed semantic fields={changed or 'unknown'}; "
+            f"saved_sha256={saved.get('sha256')} current_sha256={current['sha256']}. "
+            "Only set resume_allow_config_mismatch=true after manually proving "
+            "the optimizer/scheduler/dataloader state is compatible."
+        )
 
     def save_checkpoint(self):
         step_tag = f"step_{self.global_step:06d}"
@@ -1022,11 +1095,14 @@ class Wan22Trainer:
         return {"weights_path": ckpt_path, "state_path": state_path}
 
     def load_training_state(self, state_dir: str):
-        self.accelerator.load_state(input_dir=state_dir)
         state_file = Path(state_dir) / "trainer_state.json"
         if state_file.exists():
             with open(state_file, "r", encoding="utf-8") as f:
                 payload = json.load(f)
+            self._validate_resume_compatibility(
+                payload.get("resume_compatibility"), str(state_dir)
+            )
+            self.accelerator.load_state(input_dir=state_dir)
             self.global_step = int(payload["global_step"])
 
             if "epoch" in payload and "batch_in_epoch" in payload:
@@ -1050,6 +1126,8 @@ class Wan22Trainer:
                 )
             self.accelerator.wait_for_everyone()
             return
+
+        self.accelerator.load_state(input_dir=state_dir)
 
         match = re.search(r"step[_-](\d+)$", str(state_dir).rstrip("/"))
         if match:

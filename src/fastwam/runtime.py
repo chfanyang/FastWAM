@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime, timezone
 import inspect
 from pathlib import Path
 
@@ -174,6 +175,7 @@ def create_fastwam_video_only_raymap(
     raymap_representation: str = "rothko",
     rothko_norm_stats: str | None = None,
     rothko_config=None,
+    allow_vae_mismatch: bool = False,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
 ):
@@ -224,6 +226,7 @@ def create_fastwam_video_only_raymap(
         raymap_representation=str(raymap_representation),
         rothko_norm_stats=rothko_norm_stats,
         rothko_config=rothko_config,
+        allow_vae_mismatch=bool(allow_vae_mismatch),
     )
 
 
@@ -413,6 +416,53 @@ def build_datasets(data_cfg: DictConfig):
     return train_ds, val_ds
 
 
+def _validate_visual_action_data_contract(model, *datasets) -> None:
+    model_codec = getattr(model, "raymap_codec", None)
+    if model_codec is None:
+        return
+    model_metadata = model_codec.metadata()
+    model_stats = getattr(model_codec, "norm_stats", None)
+    for split_name, dataset in zip(("train", "val"), datasets):
+        dataset_codec = getattr(dataset, "raymap_codec", None)
+        if dataset_codec is None:
+            raise ValueError(
+                f"Visual-action model requires a raymap codec, but {split_name} "
+                "dataset has none."
+            )
+        dataset_metadata = dataset_codec.metadata()
+        if dataset_metadata != model_metadata:
+            changed = sorted(
+                key
+                for key in set(dataset_metadata) | set(model_metadata)
+                if dataset_metadata.get(key) != model_metadata.get(key)
+            )
+            raise ValueError(
+                f"{split_name} dataset/model Rothko codec mismatch; "
+                f"changed fields={changed}. Dataset encoding and model decoding "
+                "must share one canonical rothko_config."
+            )
+        dataset_stats = getattr(dataset_codec, "norm_stats", None)
+        model_fingerprint = (
+            None if model_stats is None else model_stats.fingerprint()
+        )
+        dataset_fingerprint = (
+            None if dataset_stats is None else dataset_stats.fingerprint()
+        )
+        if dataset_fingerprint != model_fingerprint:
+            raise ValueError(
+                f"{split_name} dataset/model Rothko normalization mismatch: "
+                f"dataset_sha256={dataset_fingerprint}, "
+                f"model_sha256={model_fingerprint}."
+            )
+        num_frames = getattr(dataset, "num_frames", None)
+        if num_frames is not None and int(num_frames) != int(model.action_horizon) + 1:
+            raise ValueError(
+                f"{split_name} num_frames={num_frames} is incompatible with "
+                f"model.action_horizon={model.action_horizon}; expected "
+                f"num_frames={model.action_horizon + 1}."
+            )
+
+
 def _resolve_train_device() -> str:
     if not torch.cuda.is_available():
         return "cpu"
@@ -432,14 +482,52 @@ def run_training(cfg: DictConfig):
     )
     misc.register_work_dir(cfg.output_dir)
     config_payload = OmegaConf.to_container(cfg, resolve=True)
-    with open(Path(cfg.output_dir) / "config.yaml", "w") as f:
-        OmegaConf.save(config_payload, f)
+    if int(os.environ.get("RANK", "0")) == 0:
+        output_dir = Path(cfg.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        initial_config_path = output_dir / "config.yaml"
+        if initial_config_path.exists():
+            if cfg.get("resume") in (None, "", "null"):
+                raise FileExistsError(
+                    f"Refusing to overwrite existing run config: {initial_config_path}. "
+                    "Use a new output_dir or set resume explicitly."
+                )
+            resume_config_dir = output_dir / "resume_configs"
+            resume_config_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            resume_config_path = resume_config_dir / f"resume_{timestamp}.yaml"
+            with resume_config_path.open("w", encoding="utf-8") as f:
+                OmegaConf.save(config_payload, f)
+            logger.info(
+                "Preserved initial config %s; saved resume invocation to %s.",
+                initial_config_path,
+                resume_config_path,
+            )
+        else:
+            with initial_config_path.open("w", encoding="utf-8") as f:
+                OmegaConf.save(config_payload, f)
 
     model_device = _resolve_train_device()
     mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
     model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
     model = instantiate(cfg.model, model_dtype=model_dtype, device=model_device)
     train_ds, val_ds = build_datasets(cfg.data)
+    _validate_visual_action_data_contract(model, train_ds, val_ds)
+    if getattr(model, "is_visual_action_model", False):
+        configured_dataset_stats = cfg.data.train.get("pretrained_norm_stats")
+        dataset_stats_path = (
+            Path(str(configured_dataset_stats))
+            if configured_dataset_stats not in (None, "", "null")
+            else Path(cfg.output_dir) / "dataset_stats.json"
+        )
+        if not dataset_stats_path.is_absolute():
+            dataset_stats_path = Path.cwd() / dataset_stats_path
+        if not dataset_stats_path.is_file():
+            raise FileNotFoundError(
+                "Visual-action training requires an identifiable dataset stats "
+                f"file, but it was not found: {dataset_stats_path}"
+            )
+        model.set_training_dataset_stats(dataset_stats_path)
 
     trainer = Wan22Trainer(
         cfg=cfg,

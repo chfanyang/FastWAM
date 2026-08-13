@@ -220,6 +220,11 @@ def main(cfg: DictConfig):
         "vae_safetensors_path",
         cfg.model.get("vae_safetensors_path"),
     )
+    _append_override(
+        overrides,
+        "allow_vae_mismatch",
+        cfg.model.get("allow_vae_mismatch", False),
+    )
     _append_override(overrides, "eval_output_dir", str(robotwin_eval_base))
     _append_override(overrides, "mixed_precision", cfg.mixed_precision)
     _append_override(overrides, "device", cfg.EVALUATION.device)

@@ -45,6 +45,19 @@ train:
   concat_multi_camera: robotwin
   raymap_representation: rothko
   rothko_norm_stats: ./data/robotwin2.0/rothko_region_symmetric_q99p95_h16_384x320.pt
+  # Canonical Rothko geometry shared by dataset encoding and model decoding.
+  rothko_config:
+    image_height: 384
+    image_width: 320
+    arm_height: 192
+    arm_width: 160
+    focal: 0.2
+    center_scale: 1.0
+    dir_scale: 1.0
+    center_frac: 0.5
+    boundary_margin: 8
+    outer_margin: 8
+    duplicate_vertical: true
   processor:
     _target_: fastwam.datasets.lerobot.processors.fastwam_processor.FastWAMProcessor
     shape_meta: ${data.train.shape_meta}
@@ -89,7 +102,8 @@ val:
   skip_padding_as_possible: false
   concat_multi_camera: robotwin
   raymap_representation: rothko
-  rothko_norm_stats: ./data/robotwin2.0/rothko_region_symmetric_q99p95_h16_384x320.pt
+  rothko_norm_stats: ${data.train.rothko_norm_stats}
+  rothko_config: ${data.train.rothko_config}
   processor:
     _target_: fastwam.datasets.lerobot.processors.fastwam_processor.FastWAMProcessor
     shape_meta: ${data.train.shape_meta}

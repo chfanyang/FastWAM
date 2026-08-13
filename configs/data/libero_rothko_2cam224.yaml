@@ -46,6 +46,20 @@ train:
   concat_multi_camera: horizontal
   raymap_representation: libero_rothko
   rothko_norm_stats: ./data/libero_mujoco3.3.2/libero_rothko_region_symmetric_q99p95_h16_224x448.pt
+  # Canonical Rothko geometry.  The model consumes this exact object through
+  # interpolation, so dataset encoding and model decoding cannot drift.
+  rothko_config:
+    image_height: 224
+    image_width: 448
+    tile_height: 224
+    tile_width: 224
+    focal: 0.2
+    center_scale: 1.0
+    dir_scale: 1.0
+    center_frac: 0.5
+    boundary_margin: 8
+    outer_margin: 8
+    duplicate_horizontal: true
   processor:
     _target_: fastwam.datasets.lerobot.processors.fastwam_processor.FastWAMProcessor
     shape_meta: ${data.train.shape_meta}

@@ -6,8 +6,10 @@ load_text_encoder: false
 proprio_dim: ${data.train.processor.proprio_output_dim}
 redirect_common_files: true
 vae_safetensors_path: null
+allow_vae_mismatch: false
 skip_dit_load_from_pretrain: false
 action_horizon: 16
+raymap_representation: rothko
 rothko_norm_stats: ${data.train.rothko_norm_stats}
 
 video_dit_config:
@@ -42,15 +44,4 @@ loss:
   lambda_rgb: 1.0
   lambda_raymap: 5.0
 
-rothko_config:
-  image_height: 384
-  image_width: 320
-  arm_height: 192
-  arm_width: 160
-  focal: 0.2
-  center_scale: 1.0
-  dir_scale: 1.0
-  center_frac: 0.5
-  boundary_margin: 8
-  outer_margin: 8
-  duplicate_vertical: true
+rothko_config: ${data.train.rothko_config}

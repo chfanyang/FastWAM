@@ -85,6 +85,12 @@ class LiberoRothkoCodec:
             norm_stats = RothkoNormStats.load(norm_stats)
         self.norm_stats = norm_stats
         if self.norm_stats is not None:
+            expected_shape = (1, 3, self.config.image_height, self.config.image_width)
+            if tuple(self.norm_stats.lo.shape) != expected_shape:
+                raise ValueError(
+                    "LIBERO Rothko stats tensor shape mismatch: "
+                    f"stats={tuple(self.norm_stats.lo.shape)} codec={expected_shape}."
+                )
             self._validate_stats_metadata(self.norm_stats.metadata)
 
     def metadata(self) -> dict[str, Any]:
@@ -119,8 +125,14 @@ class LiberoRothkoCodec:
         if self.expected_action_horizon is not None:
             expected["action_horizon"] = self.expected_action_horizon
             expected["pixel_frames"] = self.expected_action_horizon + 1
+        strict = int(metadata.get("stats_format_version", 1)) >= 2
         for key, value in expected.items():
             if key not in metadata:
+                if strict:
+                    raise ValueError(
+                        "LIBERO Rothko stats v2 metadata is missing required key "
+                        f"{key!r}."
+                    )
                 continue
             actual = metadata[key]
             if isinstance(value, float):

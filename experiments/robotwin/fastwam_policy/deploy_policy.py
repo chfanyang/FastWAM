@@ -216,6 +216,8 @@ class WorldActionRobotWinPolicy:
 
         self.model = instantiate(model_cfg_copy, model_dtype=model_dtype, device=device)
         self.model.load_checkpoint(checkpoint_path)
+        if hasattr(self.model, "validate_dataset_stats"):
+            self.model.validate_dataset_stats(dataset_stats_path)
         self.model = self.model.to(device).eval()
         self.is_visual_action_model = bool(
             getattr(self.model, "is_visual_action_model", False)
@@ -576,6 +578,9 @@ def get_model(usr_args: Dict[str, Any]):
     vae_safetensors_path = usr_args.get("vae_safetensors_path")
     if not _is_none_like(vae_safetensors_path):
         model_cfg.vae_safetensors_path = str(vae_safetensors_path)
+    model_cfg.allow_vae_mismatch = bool(
+        usr_args.get("allow_vae_mismatch", False)
+    )
 
     checkpoint_path = usr_args.get("ckpt_setting")
     if _is_none_like(checkpoint_path):

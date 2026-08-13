@@ -6,6 +6,7 @@ load_text_encoder: false
 proprio_dim: null
 redirect_common_files: true
 vae_safetensors_path: null
+allow_vae_mismatch: false
 skip_dit_load_from_pretrain: false
 action_horizon: 16
 raymap_representation: libero_rothko
@@ -43,15 +44,4 @@ loss:
   lambda_rgb: 1.0
   lambda_raymap: 5.0
 
-rothko_config:
-  image_height: 224
-  image_width: 448
-  tile_height: 224
-  tile_width: 224
-  focal: 0.2
-  center_scale: 1.0
-  dir_scale: 1.0
-  center_frac: 0.5
-  boundary_margin: 8
-  outer_margin: 8
-  duplicate_horizontal: true
+rothko_config: ${data.train.rothko_config}

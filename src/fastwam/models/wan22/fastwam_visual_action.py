@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 
@@ -60,6 +62,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         raymap_representation: str = "rothko",
         rothko_norm_stats: Optional[str] = None,
         rothko_config: Optional[dict[str, Any]] = None,
+        allow_vae_mismatch: bool = False,
     ):
         super().__init__()
         self.video_expert = video_expert
@@ -130,6 +133,11 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         self.device = torch.device(device)
         self.torch_dtype = torch_dtype
         self.base_model_id: Optional[str] = None
+        self.vae_safetensors_path_requested: Optional[str] = None
+        self.allow_vae_mismatch = bool(allow_vae_mismatch)
+        self._vae_identity_cache: Optional[dict[str, Any]] = None
+        self.dataset_stats_sha256: Optional[str] = None
+        self.checkpoint_dataset_stats_sha256: Optional[str] = None
         self.lora_config: Optional[dict[str, Any]] = None
         self.lora_train_proprio_encoder = True
         self.to(self.device)
@@ -157,6 +165,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         raymap_representation: str = "rothko",
         rothko_norm_stats: Optional[str] = None,
         rothko_config: Optional[dict[str, Any]] = None,
+        allow_vae_mismatch: bool = False,
     ) -> "FastWAMVideoOnlyRaymap":
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required.")
@@ -192,6 +201,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             raymap_representation=raymap_representation,
             rothko_norm_stats=rothko_norm_stats,
             rothko_config=rothko_config,
+            allow_vae_mismatch=allow_vae_mismatch,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -200,6 +210,9 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             "tokenizer": components.tokenizer_path,
         }
         model.base_model_id = str(model_id)
+        model.vae_safetensors_path_requested = (
+            None if vae_safetensors_path is None else str(vae_safetensors_path)
+        )
         return model
 
     @torch.no_grad()
@@ -675,8 +688,14 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                 "Cannot save a video-only checkpoint without "
                 "`video_expert.video_attention_mask_mode`."
             )
+        norm_stats = getattr(self.raymap_codec, "norm_stats", None)
         return {
             **self.raymap_codec.metadata(),
+            "norm_stats_sha256": (
+                None if norm_stats is None else norm_stats.fingerprint()
+            ),
+            "vae_identity": self._current_vae_identity(),
+            "dataset_stats_sha256": self.dataset_stats_sha256,
             "raymap_representation": self.raymap_representation,
             "action_horizon": self.action_horizon,
             "latent_layout": "rgb_then_raymap",
@@ -688,6 +707,218 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                 "raymap": self.loss_lambda_raymap,
             },
         }
+
+    @staticmethod
+    def _dataset_stats_fingerprint(path: str | Path) -> str:
+        stats_path = Path(path).expanduser().resolve()
+        with stats_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def set_training_dataset_stats(self, path: str | Path) -> None:
+        self.dataset_stats_sha256 = self._dataset_stats_fingerprint(path)
+
+    def validate_dataset_stats(self, path: str | Path) -> None:
+        current = self._dataset_stats_fingerprint(path)
+        expected = self.checkpoint_dataset_stats_sha256
+        if expected is None:
+            logger.warning(
+                "Checkpoint has no recoverable dataset-stats identity; %s cannot "
+                "be authenticated.",
+                path,
+            )
+            return
+        if current != expected:
+            raise ValueError(
+                "Checkpoint dataset normalization stats mismatch: "
+                f"checkpoint_sha256={expected}, current_sha256={current}, "
+                f"path={path}."
+            )
+
+    def _current_vae_identity(self) -> Optional[dict[str, Any]]:
+        if self._vae_identity_cache is not None:
+            return dict(self._vae_identity_cache)
+        model_paths = getattr(self, "model_paths", None)
+        path_value = model_paths.get("vae") if isinstance(model_paths, dict) else None
+        if path_value in (None, "", "null"):
+            return None
+        path = Path(str(path_value)).expanduser().resolve()
+        identity: dict[str, Any] = {
+            "kind": (
+                "custom"
+                if self.vae_safetensors_path_requested not in (None, "", "null")
+                else "original_wan22"
+            ),
+            "filename": path.name,
+        }
+        if path.is_file():
+            identity.update(
+                {
+                    "size_bytes": path.stat().st_size,
+                    "sha256": self._sha256_file(path),
+                }
+            )
+        else:
+            logger.warning(
+                "VAE source %s is not a file; checkpoint VAE identity is limited.",
+                path,
+            )
+        self._vae_identity_cache = identity
+        return dict(identity)
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _validate_vae_identity(
+        self,
+        checkpoint_identity: Optional[dict[str, Any]],
+        *,
+        run_config: Optional[DictConfig],
+        checkpoint_path: str,
+    ) -> None:
+        current = self._current_vae_identity()
+        mismatch_reason: Optional[str] = None
+        if isinstance(checkpoint_identity, dict):
+            if current is None:
+                mismatch_reason = "checkpoint identifies a VAE but the model does not"
+            elif checkpoint_identity.get("sha256") and current.get("sha256"):
+                if checkpoint_identity["sha256"] != current["sha256"]:
+                    mismatch_reason = (
+                        f"checkpoint_sha256={checkpoint_identity['sha256']} "
+                        f"model_sha256={current['sha256']}"
+                    )
+            elif checkpoint_identity.get("kind") != current.get("kind"):
+                mismatch_reason = (
+                    f"checkpoint_kind={checkpoint_identity.get('kind')} "
+                    f"model_kind={current.get('kind')}"
+                )
+        elif run_config is not None:
+            trained_custom = OmegaConf.select(
+                run_config, "model.vae_safetensors_path"
+            )
+            trained_kind = (
+                "custom"
+                if trained_custom not in (None, "", "null")
+                else "original_wan22"
+            )
+            current_kind = None if current is None else current.get("kind")
+            if trained_kind != current_kind:
+                mismatch_reason = (
+                    f"legacy run config used {trained_kind}, model uses {current_kind}"
+                )
+            elif trained_kind == "custom" and current is not None:
+                trained_path = Path(str(trained_custom)).expanduser()
+                if not trained_path.is_absolute():
+                    trained_path = Path.cwd() / trained_path
+                if trained_path.is_file() and current.get("sha256"):
+                    trained_sha256 = self._sha256_file(trained_path.resolve())
+                    if trained_sha256 != current["sha256"]:
+                        mismatch_reason = (
+                            f"legacy_run_vae_sha256={trained_sha256} "
+                            f"model_sha256={current['sha256']}"
+                        )
+                else:
+                    logger.warning(
+                        "Checkpoint %s predates embedded VAE identity and the "
+                        "training custom VAE path %s cannot be hashed.",
+                        checkpoint_path,
+                        trained_path,
+                    )
+            else:
+                logger.warning(
+                    "Checkpoint %s predates embedded VAE identity; recovered VAE "
+                    "kind=%s from run config, but exact bytes are unauthenticated.",
+                    checkpoint_path,
+                    trained_kind,
+                )
+        else:
+            logger.warning(
+                "Checkpoint %s has no VAE identity and no run config; VAE bytes "
+                "cannot be authenticated.",
+                checkpoint_path,
+            )
+        if mismatch_reason is None:
+            return
+        message = (
+            "Checkpoint VAE mismatch: "
+            f"{mismatch_reason}. The frozen VAE is not stored in the DiT checkpoint."
+        )
+        if self.allow_vae_mismatch:
+            logger.warning("%s Proceeding because allow_vae_mismatch=true.", message)
+            return
+        raise ValueError(
+            message
+            + " Use the training VAE, or explicitly set "
+            "model.allow_vae_mismatch=true for an intentional VAE ablation."
+        )
+
+    @staticmethod
+    def _find_run_config(
+        checkpoint_path: str,
+    ) -> tuple[Optional[DictConfig], Optional[Path]]:
+        checkpoint = Path(checkpoint_path).resolve()
+        for parent in list(checkpoint.parents)[:5]:
+            candidate = parent / "config.yaml"
+            if candidate.is_file():
+                return OmegaConf.load(candidate), candidate
+        return None, None
+
+    @staticmethod
+    def _metadata_values_match(actual: Any, expected: Any) -> bool:
+        if isinstance(expected, float):
+            try:
+                return abs(float(actual) - expected) <= 1e-8
+            except (TypeError, ValueError):
+                return False
+        if isinstance(expected, tuple):
+            expected = list(expected)
+        if isinstance(actual, tuple):
+            actual = list(actual)
+        return actual == expected
+
+    def _recover_legacy_norm_stats_fingerprint(
+        self,
+        *,
+        run_config: Optional[DictConfig],
+        run_config_path: Optional[Path],
+    ) -> Optional[str]:
+        if run_config is None:
+            return None
+        configured_path = OmegaConf.select(run_config, "model.rothko_norm_stats")
+        if configured_path in (None, "", "null"):
+            configured_path = OmegaConf.select(
+                run_config, "data.train.rothko_norm_stats"
+            )
+        if configured_path in (None, "", "null"):
+            return None
+        raw_path = Path(str(configured_path)).expanduser()
+        candidates = [raw_path]
+        if not raw_path.is_absolute():
+            candidates = [Path.cwd() / raw_path]
+            if run_config_path is not None:
+                candidates.append(run_config_path.parent / raw_path)
+        stats_path = next((path for path in candidates if path.is_file()), None)
+        if stats_path is None:
+            logger.warning(
+                "Could not resolve legacy checkpoint Rothko stats path %r from %s.",
+                configured_path,
+                run_config_path,
+            )
+            return None
+        from fastwam.representations.rothko import RothkoNormStats
+
+        return RothkoNormStats.load(stats_path).fingerprint()
 
     def _validate_visual_action_checkpoint_config(
         self,
@@ -704,26 +935,22 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                 "`video_expert.video_attention_mask_mode`."
             )
 
+        run_config, run_config_path = self._find_run_config(checkpoint_path)
         checkpoint_attention_mode = visual_config.get(
             "video_attention_mask_mode"
         )
         if checkpoint_attention_mode is None:
-            run_config_mode = None
-            run_config_path = None
-            checkpoint = Path(checkpoint_path).resolve()
-            for parent in list(checkpoint.parents)[:4]:
-                candidate = parent / "config.yaml"
-                if not candidate.is_file():
-                    continue
-                run_config = OmegaConf.load(candidate)
-                configured_mode = OmegaConf.select(
+            configured_mode = (
+                None
+                if run_config is None
+                else OmegaConf.select(
                     run_config,
                     "model.video_dit_config.video_attention_mask_mode",
                 )
-                if configured_mode is not None:
-                    run_config_mode = str(configured_mode).strip()
-                    run_config_path = candidate
-                break
+            )
+            run_config_mode = (
+                None if configured_mode is None else str(configured_mode).strip()
+            )
 
             if run_config_mode:
                 checkpoint_attention_mode = run_config_mode
@@ -779,6 +1006,88 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                 f"checkpoint={checkpoint_representation!r}, "
                 f"model={self.raymap_representation!r}."
             )
+
+        expected_codec_metadata = self.raymap_codec.metadata()
+        missing_codec_keys: list[str] = []
+        for key, expected in expected_codec_metadata.items():
+            if key == "raymap_representation":
+                continue
+            if key not in visual_config:
+                missing_codec_keys.append(key)
+                continue
+            actual = visual_config[key]
+            if not self._metadata_values_match(actual, expected):
+                raise ValueError(
+                    f"Checkpoint Rothko codec mismatch for {key}: "
+                    f"checkpoint={actual!r}, model={expected!r}. Use the exact "
+                    "training Rothko configuration for evaluation/resume."
+                )
+        if missing_codec_keys:
+            logger.warning(
+                "Checkpoint %s predates complete Rothko codec metadata; missing "
+                "keys=%s. Geometry could not be fully authenticated.",
+                checkpoint_path,
+                missing_codec_keys,
+            )
+
+        current_stats = getattr(self.raymap_codec, "norm_stats", None)
+        expected_stats_fingerprint = (
+            None if current_stats is None else current_stats.fingerprint()
+        )
+        checkpoint_stats_fingerprint = visual_config.get("norm_stats_sha256")
+        if checkpoint_stats_fingerprint is None:
+            checkpoint_stats_fingerprint = self._recover_legacy_norm_stats_fingerprint(
+                run_config=run_config,
+                run_config_path=run_config_path,
+            )
+            if checkpoint_stats_fingerprint is not None:
+                logger.warning(
+                    "Checkpoint %s predates embedded norm-stats identity; recovered "
+                    "it from %s.",
+                    checkpoint_path,
+                    run_config_path,
+                )
+            elif expected_stats_fingerprint is not None:
+                logger.warning(
+                    "Checkpoint %s has no recoverable norm-stats identity. The "
+                    "current stats cannot be authenticated against this legacy "
+                    "checkpoint.",
+                    checkpoint_path,
+                )
+        if (
+            checkpoint_stats_fingerprint is not None
+            and expected_stats_fingerprint != checkpoint_stats_fingerprint
+        ):
+            raise ValueError(
+                "Checkpoint Rothko normalization stats mismatch: "
+                f"checkpoint_sha256={checkpoint_stats_fingerprint}, "
+                f"model_sha256={expected_stats_fingerprint}. Use the exact stats "
+                "used during training."
+            )
+
+        self._validate_vae_identity(
+            visual_config.get("vae_identity"),
+            run_config=run_config,
+            checkpoint_path=checkpoint_path,
+        )
+
+        checkpoint_dataset_stats = visual_config.get("dataset_stats_sha256")
+        if checkpoint_dataset_stats is None:
+            checkpoint = Path(checkpoint_path).resolve()
+            for parent in list(checkpoint.parents)[:5]:
+                candidate = parent / "dataset_stats.json"
+                if candidate.is_file():
+                    checkpoint_dataset_stats = self._dataset_stats_fingerprint(
+                        candidate
+                    )
+                    logger.warning(
+                        "Checkpoint %s predates embedded dataset-stats identity; "
+                        "recovered it from %s.",
+                        checkpoint_path,
+                        candidate,
+                    )
+                    break
+        self.checkpoint_dataset_stats_sha256 = checkpoint_dataset_stats
 
     def save_checkpoint(self, path, optimizer=None, step=None) -> None:
         payload: dict[str, Any] = {

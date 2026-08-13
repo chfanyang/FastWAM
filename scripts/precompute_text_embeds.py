@@ -372,6 +372,14 @@ def main(cfg: DictConfig):
                     payload = {
                         "context": context_i,
                         "mask": mask_i,
+                        "cache_metadata": {
+                            "format_version": 2,
+                            "prompt_sha256": hashed,
+                            "context_len": context_len,
+                            "encoder_id": enc_id,
+                            "model_id": model_id,
+                            "tokenizer_model_id": tokenizer_model_id,
+                        },
                     }
 
                     for cache_dir in cache_dirs:

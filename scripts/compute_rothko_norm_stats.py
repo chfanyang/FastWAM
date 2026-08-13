@@ -188,9 +188,15 @@ def _center_mask(center_frac: float) -> torch.Tensor:
     return mask
 
 
-def _build_stats(bounds: np.ndarray, center_frac: float) -> tuple[torch.Tensor, torch.Tensor]:
-    lo = torch.full((1, 3, IMAGE_HEIGHT, IMAGE_WIDTH), -1.0)
-    hi = torch.full_like(lo, 1.0)
+def _build_stats(
+    bounds: np.ndarray,
+    center_frac: float,
+    center_scale: float,
+    dir_scale: float,
+    outer_margin: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    lo = torch.full((1, 3, IMAGE_HEIGHT, IMAGE_WIDTH), -float(dir_scale))
+    hi = torch.full_like(lo, float(dir_scale))
     center = _center_mask(center_frac)
     for y_offset in (0, ARM_HEIGHT):
         for x_offset in (0, ARM_WIDTH):
@@ -207,8 +213,17 @@ def _build_stats(bounds: np.ndarray, center_frac: float) -> tuple[torch.Tensor, 
                     y_offset : y_offset + ARM_HEIGHT,
                     x_offset : x_offset + ARM_WIDTH,
                 ]
-                lo_tile[center] = -float(bound)
-                hi_tile[center] = float(bound)
+                lo_tile[center] = -float(bound) * float(center_scale)
+                hi_tile[center] = float(bound) * float(center_scale)
+                if outer_margin:
+                    lo_tile[:outer_margin, :] = -1.0
+                    lo_tile[-outer_margin:, :] = -1.0
+                    lo_tile[:, :outer_margin] = -1.0
+                    lo_tile[:, -outer_margin:] = -1.0
+                    hi_tile[:outer_margin, :] = 1.0
+                    hi_tile[-outer_margin:, :] = 1.0
+                    hi_tile[:, :outer_margin] = 1.0
+                    hi_tile[:, -outer_margin:] = 1.0
     return lo, hi
 
 
@@ -222,10 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(
-            "data/robotwin2.0/"
-            "rothko_region_symmetric_q99p95_h16_384x320.pt"
-        ),
+        default=None,
     )
     parser.add_argument("--horizon", type=int, default=16)
     parser.add_argument("--windows-per-episode", type=int, default=32)
@@ -262,6 +274,16 @@ def main() -> None:
         raise ValueError("quantile must be in (0,1).")
     if args.histogram_max <= 0:
         raise ValueError("histogram-max must be positive.")
+    if min(args.center_scale, args.dir_scale, args.focal) <= 0:
+        raise ValueError("focal, center-scale, and dir-scale must be positive.")
+    if args.output is None:
+        quantile_label = (
+            f"{args.quantile * 100:.8f}".rstrip("0").rstrip(".")
+        ).replace(".", "p")
+        args.output = Path(
+            "data/robotwin2.0/"
+            f"rothko_region_symmetric_q{quantile_label}_h{args.horizon}_384x320.pt"
+        )
 
     dataset_root = args.dataset_root.resolve()
     paths, info = _episode_paths(dataset_root, args.limit)
@@ -313,9 +335,16 @@ def main() -> None:
         )
 
     bounds = _quantile_bounds(histogram, args.quantile, args.histogram_max)
-    lo, hi = _build_stats(bounds, args.center_frac)
+    lo, hi = _build_stats(
+        bounds,
+        args.center_frac,
+        args.center_scale,
+        args.dir_scale,
+        args.outer_margin,
+    )
     elapsed = time.time() - started
     metadata: dict[str, Any] = {
+        "stats_format_version": 2,
         "representation": "rothko",
         "encoding": "state_frame0_plus_future_action_endpose",
         "quaternion_order": "wxyz",

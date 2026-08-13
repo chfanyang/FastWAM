@@ -130,9 +130,15 @@ def _bounds(histogram: np.ndarray, quantile: float, max_abs: float) -> np.ndarra
     return (indices + 1) * max_abs / histogram.shape[1]
 
 
-def _build_stats(bounds: np.ndarray, center_frac: float) -> tuple[torch.Tensor, torch.Tensor]:
-    lo = torch.full((1, 3, IMAGE_HEIGHT, IMAGE_WIDTH), -1.0)
-    hi = torch.full_like(lo, 1.0)
+def _build_stats(
+    bounds: np.ndarray,
+    center_frac: float,
+    center_scale: float,
+    dir_scale: float,
+    outer_margin: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    lo = torch.full((1, 3, IMAGE_HEIGHT, IMAGE_WIDTH), -float(dir_scale))
+    hi = torch.full_like(lo, float(dir_scale))
     center_h = int(round(TILE_HEIGHT * center_frac))
     center_w = int(round(TILE_WIDTH * center_frac))
     y0 = (TILE_HEIGHT - center_h) // 2
@@ -144,13 +150,24 @@ def _build_stats(bounds: np.ndarray, center_frac: float) -> tuple[torch.Tensor, 
                 channel,
                 y0 : y0 + center_h,
                 x_offset + x0 : x_offset + x0 + center_w,
-            ] = -float(bound)
+            ] = -float(bound) * float(center_scale)
             hi[
                 0,
                 channel,
                 y0 : y0 + center_h,
                 x_offset + x0 : x_offset + x0 + center_w,
-            ] = float(bound)
+            ] = float(bound) * float(center_scale)
+        if outer_margin:
+            tile_lo = lo[:, :, :, x_offset : x_offset + TILE_WIDTH]
+            tile_hi = hi[:, :, :, x_offset : x_offset + TILE_WIDTH]
+            tile_lo[:, :, :outer_margin, :] = -1.0
+            tile_lo[:, :, -outer_margin:, :] = -1.0
+            tile_lo[:, :, :, :outer_margin] = -1.0
+            tile_lo[:, :, :, -outer_margin:] = -1.0
+            tile_hi[:, :, :outer_margin, :] = 1.0
+            tile_hi[:, :, -outer_margin:, :] = 1.0
+            tile_hi[:, :, :, :outer_margin] = 1.0
+            tile_hi[:, :, :, -outer_margin:] = 1.0
     return lo, hi
 
 
@@ -183,9 +200,16 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    if not 0.0 < args.quantile < 1.0:
+        raise ValueError("quantile must be in (0,1).")
+    if min(args.center_scale, args.dir_scale, args.focal) <= 0:
+        raise ValueError("focal, center-scale, and dir-scale must be positive.")
+    quantile_label = (f"{args.quantile * 100:.8f}".rstrip("0").rstrip(".")).replace(
+        ".", "p"
+    )
     output = args.output or (
         args.data_root
-        / f"libero_rothko_region_symmetric_q99p95_h{args.horizon}_224x448.pt"
+        / f"libero_rothko_region_symmetric_q{quantile_label}_h{args.horizon}_224x448.pt"
     )
     paths, infos = _paths(args.data_root.resolve(), args.limit)
     worker_count = min(args.workers, len(paths))
@@ -216,8 +240,15 @@ def main() -> None:
             f"{overflow} relative positions reached --histogram-max={args.histogram_max}."
         )
     bounds = _bounds(histogram, args.quantile, args.histogram_max)
-    lo, hi = _build_stats(bounds, args.center_frac)
+    lo, hi = _build_stats(
+        bounds,
+        args.center_frac,
+        args.center_scale,
+        args.dir_scale,
+        args.outer_margin,
+    )
     metadata: dict[str, Any] = {
+        "stats_format_version": 2,
         "environment": "libero",
         "representation": "rothko",
         "raymap_representation": "libero_rothko",
@@ -241,6 +272,7 @@ def main() -> None:
         "center_frac": args.center_frac,
         "boundary_margin": args.boundary_margin,
         "outer_margin": args.outer_margin,
+        "duplicate_horizontal": True,
         "gripper_conversion": "(left_qpos-right_qpos)/(2*0.04m)",
         "dataset_roots": [
             str((args.data_root / name).resolve()) for name in DATASET_NAMES

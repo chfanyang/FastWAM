@@ -54,6 +54,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         raw_state_meta=None,
         raymap_representation: Optional[str] = None,
         rothko_norm_stats: Optional[str] = None,
+        rothko_config=None,
         sample_error_mode: str = "fallback",
     ):
         episode_indices = None
@@ -94,6 +95,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         self.video_size = video_size
         self.text_embedding_cache_dir = text_embedding_cache_dir
         self.context_len = context_len
+        self._warned_legacy_text_cache = False
         self.skip_padding_as_possible = skip_padding_as_possible
         self.max_padding_retry = max_padding_retry
         self.concat_multi_camera = concat_multi_camera
@@ -120,22 +122,35 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 )
             if rothko_norm_stats is None:
                 raise ValueError("`rothko_norm_stats` is required for Rothko training.")
-            if raymap_representation == "rothko":
-                codec_config = RothkoCodecConfig(
-                    image_height=int(video_size[0]),
-                    image_width=int(video_size[1]),
+            if isinstance(rothko_config, DictConfig):
+                rothko_config = OmegaConf.to_container(rothko_config, resolve=True)
+            if rothko_config is None:
+                rothko_config = {}
+            if not isinstance(rothko_config, dict):
+                raise ValueError(
+                    "`rothko_config` must be dict-like, got "
+                    f"{type(rothko_config)}."
                 )
+            if raymap_representation == "rothko":
+                codec_config_kwargs = {
+                    "image_height": int(video_size[0]),
+                    "image_width": int(video_size[1]),
+                    **rothko_config,
+                }
+                codec_config = RothkoCodecConfig(**codec_config_kwargs)
                 self.raymap_codec = RothkoCodec(
                     config=codec_config,
                     norm_stats=rothko_norm_stats,
                 )
             else:
-                codec_config = LiberoRothkoCodecConfig(
-                    image_height=int(video_size[0]),
-                    image_width=int(video_size[1]),
-                    tile_height=int(video_size[0]),
-                    tile_width=int(video_size[1]) // 2,
-                )
+                codec_config_kwargs = {
+                    "image_height": int(video_size[0]),
+                    "image_width": int(video_size[1]),
+                    "tile_height": int(video_size[0]),
+                    "tile_width": int(video_size[1]) // 2,
+                    **rothko_config,
+                }
+                codec_config = LiberoRothkoCodecConfig(**codec_config_kwargs)
                 self.raymap_codec = LiberoRothkoCodec(
                     config=codec_config,
                     norm_stats=rothko_norm_stats,
@@ -418,6 +433,28 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 "Run scripts/precompute_text_embeds.py first."
             )
         payload = torch.load(cache_path, map_location="cpu")
+        cache_metadata = payload.get("cache_metadata")
+        if cache_metadata is None:
+            if not self._warned_legacy_text_cache:
+                logger.warning(
+                    "Legacy text embedding cache has no identity metadata: %s. "
+                    "Regenerate it before changing the text encoder/tokenizer.",
+                    cache_path,
+                )
+                self._warned_legacy_text_cache = True
+        else:
+            expected_cache_metadata = {
+                "prompt_sha256": hashed,
+                "context_len": self.context_len,
+                "encoder_id": "wan22ti2v5b",
+            }
+            for key, expected in expected_cache_metadata.items():
+                actual = cache_metadata.get(key)
+                if actual != expected:
+                    raise ValueError(
+                        f"Text embedding cache metadata mismatch for {key}: "
+                        f"cache={actual!r}, expected={expected!r}, path={cache_path}."
+                    )
         context = payload["context"]
         context_mask = payload["mask"].bool()
         if context.ndim != 2:
