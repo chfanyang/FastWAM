@@ -245,3 +245,6 @@ manifest.json
 wandb/
 onelogger.err
 onelogger.log
+
+# Local upstream benchmark checkout; FastWAM integration code lives outside it.
+third_party/LIBERO-plus/
