@@ -13,23 +13,86 @@ from .state_dict_converters import (
 )
 from ..wan_video_dit import WanVideoDiT
 from ..wan_video_text_encoder import HuggingfaceTokenizer, WanTextEncoder
-from ..wan_video_vae import WanVideoVAE38
+from ..wan_video_vae import WanVideoVAE, WanVideoVAE38
 from fastwam.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 SKIPPED_PRETRAIN_SENTINEL = "SKIPPED_PRETRAIN"
 
 
+@dataclass(frozen=True)
+class WanModelSpec:
+    name: str
+    model_id: str
+    vae_filename: str
+    vae_class: type[WanVideoVAE]
+
+
+WAN_MODEL_SPECS = {
+    "wan2.1-t2v-1.3b": WanModelSpec(
+        name="wan2.1-t2v-1.3b",
+        model_id="Wan-AI/Wan2.1-T2V-1.3B",
+        vae_filename="Wan2.1_VAE.pth",
+        vae_class=WanVideoVAE,
+    ),
+    "wan2.2-ti2v-5b": WanModelSpec(
+        name="wan2.2-ti2v-5b",
+        model_id="Wan-AI/Wan2.2-TI2V-5B",
+        vae_filename="Wan2.2_VAE.pth",
+        vae_class=WanVideoVAE38,
+    ),
+}
+
+
+def resolve_wan_model_spec(
+    model_id: str,
+    model_variant: str | None = None,
+) -> WanModelSpec:
+    if model_variant is not None:
+        key = str(model_variant).strip().lower()
+        if key not in WAN_MODEL_SPECS:
+            raise ValueError(
+                f"Unsupported Wan model_variant={model_variant!r}. "
+                f"Supported variants: {sorted(WAN_MODEL_SPECS)}"
+            )
+        spec = WAN_MODEL_SPECS[key]
+        if str(model_id).rstrip("/").lower() != spec.model_id.lower():
+            raise ValueError(
+                "Wan model_id/model_variant mismatch: "
+                f"model_id={model_id!r}, model_variant={model_variant!r}, "
+                f"expected_model_id={spec.model_id!r}."
+            )
+        return spec
+
+    normalized = str(model_id).rstrip("/").lower()
+    matches = [
+        spec for spec in WAN_MODEL_SPECS.values()
+        if normalized == spec.model_id.lower()
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Cannot infer a supported Wan variant from model_id={model_id!r}. "
+            "Set `model_variant` explicitly. Supported official model IDs: "
+            f"{[spec.model_id for spec in WAN_MODEL_SPECS.values()]}"
+        )
+    return matches[0]
+
+
 @dataclass
-class Wan22LoadedComponents:
+class WanLoadedComponents:
     dit: WanVideoDiT
-    vae: WanVideoVAE38
+    vae: WanVideoVAE
     text_encoder: WanTextEncoder | None
     tokenizer: HuggingfaceTokenizer | None
     dit_path: str
     vae_path: str
     text_encoder_path: str | None
     tokenizer_path: str | None
+    model_variant: str
+
+
+# Backward-compatible public name used by the original Wan2.2-only code.
+Wan22LoadedComponents = WanLoadedComponents
 
 
 WAN22_MODEL_REGISTRY = [
@@ -40,10 +103,23 @@ WAN22_MODEL_REGISTRY = [
         "model_class": WanTextEncoder,
     },
     {
+        # ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
+        "model_hash": "9269f8db9040a9d860eaca435be61814",
+        "model_name": "wan_video_dit",
+        "model_class": WanVideoDiT,
+    },
+    {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="diffusion_pytorch_model*.safetensors")
         "model_hash": "1f5ab7703c6fc803fdded85ff040c316",
         "model_name": "wan_video_dit",
         "model_class": WanVideoDiT,
+    },
+    {
+        # ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="Wan2.1_VAE.pth")
+        "model_hash": "ccc42284ea13e1ad04693284c7a09be6",
+        "model_name": "wan_video_vae",
+        "model_class": WanVideoVAE,
+        "state_dict_converter": wan_video_vae_state_dict_converter,
     },
     {
         # Example: ModelConfig(model_id="Wan-AI/Wan2.2-TI2V-5B", origin_file_pattern="Wan2.2_VAE.pth")
@@ -119,7 +195,13 @@ def _load_registered_model(
     if state_dict_converter is not None:
         state_dict = state_dict_converter(state_dict)
 
-    model.load_state_dict(state_dict, strict=False)
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        raise ValueError(
+            f"Registered {model_name} weights do not exactly match "
+            f"{model_class.__name__}: missing={incompatible.missing_keys[:8]}, "
+            f"unexpected={incompatible.unexpected_keys[:8]}, file={path}."
+        )
     model = model.to(device=device, dtype=torch_dtype)
     return model
 
@@ -149,10 +231,11 @@ def _resolve_optional_safetensors_path(
 def _load_custom_wan_vae(
     path: Path,
     *,
+    vae_class: type[WanVideoVAE],
     torch_dtype: torch.dtype,
     device: str,
-) -> WanVideoVAE38:
-    vae = WanVideoVAE38()
+) -> WanVideoVAE:
+    vae = vae_class()
     state = load_state_dict(
         str(path),
         torch_dtype=torch_dtype,
@@ -172,7 +255,7 @@ def _load_custom_wan_vae(
             missing = sorted(expected_keys - prefixed_keys)
             unexpected = sorted(prefixed_keys - expected_keys)
         raise ValueError(
-            "Custom VAE safetensors must contain a complete WanVideoVAE38 "
+            f"Custom VAE safetensors must contain a complete {vae_class.__name__} "
             "state dict. "
             f"missing={missing[:8]}, unexpected={unexpected[:8]}, path={path}"
         )
@@ -185,26 +268,32 @@ def _load_custom_wan_vae(
     return vae
 
 
-def _resolve_configs(model_id: str, tokenizer_model_id: str, redirect_common_files: bool = True):
+def _resolve_configs(
+    model_id: str,
+    tokenizer_model_id: str,
+    redirect_common_files: bool = True,
+    model_variant: str | None = None,
+):
+    spec = resolve_wan_model_spec(model_id, model_variant)
     dit_config = ModelConfig(model_id=model_id, origin_file_pattern="diffusion_pytorch_model*.safetensors")
     text_config = ModelConfig(model_id=model_id, origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth")
-    vae_config = ModelConfig(model_id=model_id, origin_file_pattern="Wan2.2_VAE.pth")
+    vae_config = ModelConfig(model_id=model_id, origin_file_pattern=spec.vae_filename)
     tokenizer_config = ModelConfig(model_id=tokenizer_model_id, origin_file_pattern="google/umt5-xxl/")
 
     if redirect_common_files:
-        redirect_dict = {
-            "models_t5_umt5-xxl-enc-bf16.pth": ("DiffSynth-Studio/Wan-Series-Converted-Safetensors", "models_t5_umt5-xxl-enc-bf16.safetensors"),
-            "Wan2.2_VAE.pth": ("DiffSynth-Studio/Wan-Series-Converted-Safetensors", "Wan2.2_VAE.safetensors"),
-        }
-        text_config.model_id, text_config.origin_file_pattern = redirect_dict[text_config.origin_file_pattern]
-        vae_config.model_id, vae_config.origin_file_pattern = redirect_dict[vae_config.origin_file_pattern]
+        text_config.model_id = "DiffSynth-Studio/Wan-Series-Converted-Safetensors"
+        text_config.origin_file_pattern = "models_t5_umt5-xxl-enc-bf16.safetensors"
+        if spec.name == "wan2.2-ti2v-5b":
+            vae_config.model_id = "DiffSynth-Studio/Wan-Series-Converted-Safetensors"
+            vae_config.origin_file_pattern = "Wan2.2_VAE.safetensors"
     return dit_config, text_config, vae_config, tokenizer_config
 
 
-def load_wan22_ti2v_5b_components(
+def load_wan_video_components(
     device: str = "cuda",
     torch_dtype: torch.dtype = torch.bfloat16,
     model_id: str = "Wan-AI/Wan2.2-TI2V-5B",
+    model_variant: str | None = None,
     tokenizer_model_id: str = "Wan-AI/Wan2.1-T2V-1.3B",
     tokenizer_max_len: int = 512,
     redirect_common_files: bool = True,
@@ -212,18 +301,20 @@ def load_wan22_ti2v_5b_components(
     skip_dit_load_from_pretrain: bool = False,
     load_text_encoder: bool = True,
     vae_safetensors_path: str | os.PathLike[str] | None = None,
-):
-    logger.info("Loading Wan2.2-TI2V-5B components...")
+) -> WanLoadedComponents:
+    spec = resolve_wan_model_spec(model_id, model_variant)
+    logger.info("Loading %s components...", spec.name)
     start = time.time()
 
     if dit_config is None:
-        raise ValueError("`dit_config` is required for Wan2.2-TI2V-5B loading.")
+        raise ValueError(f"`dit_config` is required for {spec.name} loading.")
     validated_dit_config = _validate_dit_config(dit_config)
 
     dit_model_config, text_config, vae_config, tokenizer_config = _resolve_configs(
         model_id=model_id,
         tokenizer_model_id=tokenizer_model_id,
         redirect_common_files=redirect_common_files,
+        model_variant=spec.name,
     )
 
     custom_vae_path = _resolve_optional_safetensors_path(vae_safetensors_path)
@@ -253,6 +344,7 @@ def load_wan22_ti2v_5b_components(
             model_kwargs_override=validated_dit_config,
         )
         dit_path = str(dit_model_config.path)
+
     text_encoder: WanTextEncoder | None = None
     tokenizer: HuggingfaceTokenizer | None = None
     text_encoder_path: str | None = None
@@ -276,21 +368,32 @@ def load_wan22_ti2v_5b_components(
             "Skipping pretrained text encoder/tokenizer load (`load_text_encoder=False`); "
             "training must provide cached `context/context_mask`."
         )
+
     if custom_vae_path is None:
-        vae: WanVideoVAE38 = _load_registered_model(
+        vae: WanVideoVAE = _load_registered_model(
             vae_config.path,
             "wan_video_vae",
             torch_dtype=torch_dtype,
             device=device,
         )
+        if not isinstance(vae, spec.vae_class):
+            raise TypeError(
+                f"Loaded VAE type mismatch for {spec.name}: "
+                f"expected {spec.vae_class.__name__}, got {type(vae).__name__}."
+            )
     else:
         vae = _load_custom_wan_vae(
             custom_vae_path,
+            vae_class=spec.vae_class,
             torch_dtype=torch_dtype,
             device=device,
         )
-    logger.info("Finished loading Wan2.2-TI2V-5B components in %.2f seconds.", time.time() - start)
-    return Wan22LoadedComponents(
+    logger.info(
+        "Finished loading %s components in %.2f seconds.",
+        spec.name,
+        time.time() - start,
+    )
+    return WanLoadedComponents(
         dit=dit,
         vae=vae,
         text_encoder=text_encoder,
@@ -299,4 +402,32 @@ def load_wan22_ti2v_5b_components(
         vae_path=str(vae_config.path),
         text_encoder_path=text_encoder_path,
         tokenizer_path=tokenizer_path,
+        model_variant=spec.name,
+    )
+
+
+def load_wan22_ti2v_5b_components(
+    device: str = "cuda",
+    torch_dtype: torch.dtype = torch.bfloat16,
+    model_id: str = "Wan-AI/Wan2.2-TI2V-5B",
+    tokenizer_model_id: str = "Wan-AI/Wan2.1-T2V-1.3B",
+    tokenizer_max_len: int = 512,
+    redirect_common_files: bool = True,
+    dit_config: dict[str, Any] | None = None,
+    skip_dit_load_from_pretrain: bool = False,
+    load_text_encoder: bool = True,
+    vae_safetensors_path: str | os.PathLike[str] | None = None,
+):
+    return load_wan_video_components(
+        device=device,
+        torch_dtype=torch_dtype,
+        model_id=model_id,
+        model_variant="wan2.2-ti2v-5b",
+        tokenizer_model_id=tokenizer_model_id,
+        tokenizer_max_len=tokenizer_max_len,
+        redirect_common_files=redirect_common_files,
+        dit_config=dit_config,
+        skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
+        load_text_encoder=load_text_encoder,
+        vae_safetensors_path=vae_safetensors_path,
     )

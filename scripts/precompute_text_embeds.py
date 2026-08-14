@@ -206,6 +206,14 @@ def _get_override_prompt(override_instruction: Any) -> str | None:
 
 
 def _model_id_to_enc_id(model_id: str) -> str:
+    # Wan2.1 T2V 1.3B and Wan2.2 TI2V 5B use the exact same UMT5-XXL
+    # encoder/tokenizer.  Preserve the existing cache identity so switching the
+    # video DiT does not duplicate or invalidate language embeddings.
+    if str(model_id).rstrip("/").lower() in {
+        "wan-ai/wan2.1-t2v-1.3b",
+        "wan-ai/wan2.2-ti2v-5b",
+    }:
+        return "wan22ti2v5b"
     base = str(model_id).split("/")[-1]
     enc_id = re.sub(r"[^a-z0-9]+", "", base.lower())
     return enc_id or "textenc"

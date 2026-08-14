@@ -26,7 +26,7 @@ from ..lora import (
     load_lora_state_dict,
     lora_state_dict,
 )
-from .helpers.loader import load_wan22_ti2v_5b_components
+from .helpers.loader import load_wan_video_components
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
 
 logger = get_logger(__name__)
@@ -133,6 +133,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         self.device = torch.device(device)
         self.torch_dtype = torch_dtype
         self.base_model_id: Optional[str] = None
+        self.model_variant: Optional[str] = None
         self.vae_safetensors_path_requested: Optional[str] = None
         self.allow_vae_mismatch = bool(allow_vae_mismatch)
         self._vae_identity_cache: Optional[dict[str, Any]] = None
@@ -148,6 +149,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         device: str = "cuda",
         torch_dtype: torch.dtype = torch.bfloat16,
         model_id: str = "Wan-AI/Wan2.2-TI2V-5B",
+        model_variant: Optional[str] = None,
         tokenizer_model_id: str = "Wan-AI/Wan2.1-T2V-1.3B",
         tokenizer_max_len: int = 128,
         load_text_encoder: bool = False,
@@ -171,10 +173,11 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             raise ValueError("`video_dit_config` is required.")
         if "text_dim" not in video_dit_config:
             raise ValueError("`video_dit_config['text_dim']` is required.")
-        components = load_wan22_ti2v_5b_components(
+        components = load_wan_video_components(
             device=device,
             torch_dtype=torch_dtype,
             model_id=model_id,
+            model_variant=model_variant,
             tokenizer_model_id=tokenizer_model_id,
             tokenizer_max_len=tokenizer_max_len,
             redirect_common_files=redirect_common_files,
@@ -210,6 +213,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             "tokenizer": components.tokenizer_path,
         }
         model.base_model_id = str(model_id)
+        model.model_variant = components.model_variant
         model.vae_safetensors_path_requested = (
             None if vae_safetensors_path is None else str(vae_safetensors_path)
         )
@@ -691,6 +695,8 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         norm_stats = getattr(self.raymap_codec, "norm_stats", None)
         return {
             **self.raymap_codec.metadata(),
+            "base_model_id": self.base_model_id,
+            "model_variant": self.model_variant,
             "norm_stats_sha256": (
                 None if norm_stats is None else norm_stats.fingerprint()
             ),
@@ -749,11 +755,16 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         if path_value in (None, "", "null"):
             return None
         path = Path(str(path_value)).expanduser().resolve()
+        original_kind = (
+            "original_wan21"
+            if self.model_variant == "wan2.1-t2v-1.3b"
+            else "original_wan22"
+        )
         identity: dict[str, Any] = {
             "kind": (
                 "custom"
                 if self.vae_safetensors_path_requested not in (None, "", "null")
-                else "original_wan22"
+                else original_kind
             ),
             "filename": path.name,
         }
@@ -807,10 +818,26 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             trained_custom = OmegaConf.select(
                 run_config, "model.vae_safetensors_path"
             )
+            trained_model_variant = OmegaConf.select(
+                run_config, "model.model_variant"
+            )
+            if trained_model_variant in (None, "", "null"):
+                trained_model_id = OmegaConf.select(run_config, "model.model_id")
+                trained_model_variant = (
+                    "wan2.1-t2v-1.3b"
+                    if str(trained_model_id).rstrip("/").lower()
+                    == "wan-ai/wan2.1-t2v-1.3b"
+                    else "wan2.2-ti2v-5b"
+                )
+            trained_original_kind = (
+                "original_wan21"
+                if str(trained_model_variant) == "wan2.1-t2v-1.3b"
+                else "original_wan22"
+            )
             trained_kind = (
                 "custom"
                 if trained_custom not in (None, "", "null")
-                else "original_wan22"
+                else trained_original_kind
             )
             current_kind = None if current is None else current.get("kind")
             if trained_kind != current_kind:
@@ -980,6 +1007,29 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                 f"{self.legacy_video_attention_mask_mode!r}. Use the matching "
                 "model.video_dit_config.video_attention_mask_mode override, or "
                 "start a fresh training run."
+            )
+
+        checkpoint_base_model_id = visual_config.get("base_model_id")
+        if (
+            checkpoint_base_model_id is not None
+            and self.base_model_id is not None
+            and str(checkpoint_base_model_id) != str(self.base_model_id)
+        ):
+            raise ValueError(
+                "Checkpoint base model mismatch: "
+                f"checkpoint={checkpoint_base_model_id!r}, "
+                f"model={self.base_model_id!r}."
+            )
+        checkpoint_model_variant = visual_config.get("model_variant")
+        if (
+            checkpoint_model_variant is not None
+            and self.model_variant is not None
+            and str(checkpoint_model_variant) != str(self.model_variant)
+        ):
+            raise ValueError(
+                "Checkpoint Wan variant mismatch: "
+                f"checkpoint={checkpoint_model_variant!r}, "
+                f"model={self.model_variant!r}."
             )
 
         expected_metadata = {
@@ -1210,7 +1260,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                     "Cannot load a full fine-tuned DiT checkpoint into an "
                     "adapter-only LoRA run. The resulting adapter would depend "
                     "on that external fine-tuned base and would not be portable. "
-                    "Start LoRA from the configured original Wan2.2 base, or "
+                    "Start LoRA from the configured original Wan base, or "
                     "resume from a LoRA checkpoint/state directory."
                 )
             self.dit.load_state_dict(payload["dit"], strict=True)

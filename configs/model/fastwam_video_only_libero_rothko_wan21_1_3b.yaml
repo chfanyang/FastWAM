@@ -1,0 +1,19 @@
+defaults:
+  - fastwam_video_only_libero_rothko
+  - _self_
+
+# Native Wan2.1 T2V 1.3B DiT + native 16-channel Wan2.1 VAE.
+# RGB/Rothko layout, attention semantics, schedulers and loss weights are
+# inherited unchanged from the Wan2.2 LIBERO visual-action configuration.
+model_id: Wan-AI/Wan2.1-T2V-1.3B
+model_variant: wan2.1-t2v-1.3b
+
+video_dit_config:
+  in_dim: 16
+  hidden_dim: 1536
+  ffn_dim: 8960
+  out_dim: 16
+  num_heads: 12
+  attn_head_dim: 128
+  num_layers: 30
+

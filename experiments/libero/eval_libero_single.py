@@ -974,7 +974,8 @@ def eval_single_process(cfg: DictConfig):
 
     if _is_libero_rothko(cfg):
         # sim_libero's standard action-expert defaults skip loading the base
-        # DiT.  A portable LoRA checkpoint instead requires original Wan2.2.
+        # DiT. A portable LoRA checkpoint instead requires its configured
+        # original Wan base model.
         with open_dict(cfg.model):
             cfg.model.skip_dit_load_from_pretrain = False
             cfg.model.pop("action_dit_pretrained_path", None)
