@@ -11,6 +11,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from hydra.utils import instantiate
 from .base_lerobot_dataset import BaseLerobotDataset
+from .episode_splits import load_grouped_episode_split
 from .robotwin_tasks import resolve_robotwin_episode_indices
 from .utils.normalizer import save_dataset_stats_to_json, load_dataset_stats_from_json
 from ..dataset_utils import ResizeSmallestSideAspectPreserving, CenterCrop, Normalize
@@ -50,6 +51,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
         robotwin_task_names=None,
+        episode_split_manifest=None,
+        episode_split: Optional[str] = None,
         raw_action_meta=None,
         raw_state_meta=None,
         raymap_representation: Optional[str] = None,
@@ -66,6 +69,44 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 len(set(robotwin_task_names)),
                 len(episode_indices),
                 ", ".join(robotwin_task_names),
+            )
+        self.episode_split_metadata = None
+        if episode_split_manifest is not None:
+            if robotwin_task_names is not None:
+                raise ValueError(
+                    "`episode_split_manifest` and `robotwin_task_names` are mutually exclusive."
+                )
+            if len(dataset_dirs) != 1:
+                raise ValueError(
+                    "Grouped episode manifests currently require exactly one dataset root."
+                )
+            if val_set_proportion >= 1e-6:
+                raise ValueError(
+                    "Set `val_set_proportion=0` when using an explicit episode split manifest."
+                )
+            if episode_split is None:
+                raise ValueError(
+                    "`episode_split` is required when `episode_split_manifest` is set."
+                )
+            expected_training_flag = str(episode_split) == "train"
+            if bool(is_training_set) != expected_training_flag:
+                raise ValueError(
+                    "`is_training_set` is inconsistent with explicit episode split: "
+                    f"split={episode_split!r}, is_training_set={is_training_set}."
+                )
+            episode_indices, self.episode_split_metadata = load_grouped_episode_split(
+                episode_split_manifest,
+                str(episode_split),
+            )
+            logger.info(
+                "Using grouped episode split: path=%s sha256=%s split=%s "
+                "episodes=%d source_trajectories=%d tasks=%d",
+                self.episode_split_metadata["path"],
+                self.episode_split_metadata["sha256"],
+                self.episode_split_metadata["split"],
+                self.episode_split_metadata["episodes"],
+                self.episode_split_metadata["source_trajectories"],
+                self.episode_split_metadata["tasks"],
             )
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
