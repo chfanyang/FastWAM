@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""Fine-tune Wan2.2 VAE ``conv2 + decoder`` for LIBERO Rothko maps.
+"""Fine-tune Wan2.1/Wan2.2 VAE ``conv2 + decoder`` for LIBERO Rothko maps.
 
 This is a single-script training utility: all LIBERO parquet loading, Rothko
 encoding/decoding, validation metrics, checkpointing, and full safetensors
-export live in this file.  It only imports the Wan2.2 VAE architecture from an
+export live in this file.  It only imports the Wan VAE architectures from an
 installed FastWAM package; it does not depend on any research/replay script.
 
 The representation exactly follows FastWAM's LIBERO visual-action path:
@@ -20,7 +20,7 @@ optimizer states remain FP32; ``--bf16`` enables BF16 autocast for compute
 without converting the master weights.  The rolling ``checkpoint_latest.pt``
 contains optimizer state for exact resume, while historical
 ``checkpoint_step*.pt`` files contain decoder/conv2 weights only.  At the end,
-the script also exports a complete WanVideoVAE38 ``.safetensors`` file that
+the script also exports a complete variant-matched ``.safetensors`` file that
 FastWAM can load directly through ``model.vae_safetensors_path``.
 
 Example (all four LIBERO suites with the defaults below, four GPUs):
@@ -57,7 +57,6 @@ import pyarrow.parquet as pq
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from safetensors import safe_open
 from safetensors.torch import save_file as save_safetensors
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -71,11 +70,12 @@ if LOCAL_SRC.is_dir() and str(LOCAL_SRC) not in sys.path:
     sys.path.insert(0, str(LOCAL_SRC))
 
 try:
-    from fastwam.models.wan22.wan_video_vae import WanVideoVAE38
+    from fastwam.models.wan22.helpers.io import load_state_dict as load_wan_state_dict
+    from fastwam.models.wan22.wan_video_vae import WanVideoVAE, WanVideoVAE38
 except ModuleNotFoundError as exc:
     raise ModuleNotFoundError(
         "FastWAM must be installed (or this script must remain beside FastWAM's "
-        "src/ directory) so the Wan2.2 VAE architecture can be imported."
+        "src/ directory) so the Wan VAE architectures can be imported."
     ) from exc
 
 
@@ -99,6 +99,12 @@ DEFAULT_CONFIG_PATH = (
     SCRIPT_DIR
     / "configs/vae/libero_rothko_decoder_all4_h16_bs2_ga8_lr1e-5_ep2.json"
 )
+
+VAE_VARIANTS = {
+    "wan2.1-t2v-1.3b": (WanVideoVAE, "Wan2.1_VAE"),
+    "wan2.2-ti2v-5b": (WanVideoVAE38, "Wan2.2_VAE"),
+}
+DEFAULT_VAE_VARIANT = "wan2.2-ti2v-5b"
 
 ACTION_HORIZON = 16
 PIXEL_FRAMES = ACTION_HORIZON + 1
@@ -766,29 +772,49 @@ def compute_reconstruction_loss(
     return total, losses
 
 
-def load_base_vae(path: str, device: torch.device, dtype: torch.dtype) -> WanVideoVAE38:
+def load_base_vae(
+    path: str,
+    vae_variant: str,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> WanVideoVAE:
     path_obj = Path(path).expanduser().resolve()
-    if not path_obj.is_file() or path_obj.suffix != ".safetensors":
-        raise FileNotFoundError(f"Complete base VAE safetensors not found: {path_obj}")
-    vae = WanVideoVAE38().to(dtype=dtype)
+    if not path_obj.is_file() or path_obj.suffix.lower() not in {
+        ".safetensors", ".pth", ".pt", ".bin"
+    }:
+        raise FileNotFoundError(f"Complete base VAE weights not found: {path_obj}")
+    if vae_variant not in VAE_VARIANTS:
+        raise ValueError(
+            f"Unsupported VAE variant {vae_variant!r}; expected one of {sorted(VAE_VARIANTS)}"
+        )
+    vae_class, _ = VAE_VARIANTS[vae_variant]
+    vae = vae_class().to(dtype=dtype)
     expected = set(vae.state_dict())
-    with safe_open(path_obj, framework="pt", device="cpu") as handle:
-        provided = set(handle.keys())
-        if provided == expected:
-            state = {key: handle.get_tensor(key).to(dtype) for key in handle.keys()}
-        elif {f"model.{key}" for key in provided} == expected:
-            state = {f"model.{key}": handle.get_tensor(key).to(dtype) for key in handle.keys()}
-        else:
-            raise ValueError(
-                f"Base VAE is not a complete WanVideoVAE38 state dict: "
-                f"missing={sorted(expected - {f'model.{key}' for key in provided})[:8]}"
-            )
+    loaded = load_wan_state_dict(str(path_obj), torch_dtype=dtype, device="cpu")
+    provided = set(loaded)
+    if provided == expected:
+        state = loaded
+    elif {f"model.{key}" for key in provided} == expected:
+        state = {f"model.{key}": value for key, value in loaded.items()}
+    else:
+        direct_missing = sorted(expected - provided)
+        direct_unexpected = sorted(provided - expected)
+        prefixed = {f"model.{key}" for key in provided}
+        prefixed_missing = sorted(expected - prefixed)
+        prefixed_unexpected = sorted(prefixed - expected)
+        if len(prefixed_missing) < len(direct_missing):
+            direct_missing, direct_unexpected = prefixed_missing, prefixed_unexpected
+        raise ValueError(
+            f"Base VAE is not a complete {vae_class.__name__} state dict for "
+            f"variant={vae_variant}: missing={direct_missing[:8]}, "
+            f"unexpected={direct_unexpected[:8]}, path={path_obj}"
+        )
     vae.load_state_dict(state, strict=True)
-    del state
+    del loaded, state
     return vae.to(device=device, dtype=dtype).eval()
 
 
-def prepare_decoder_finetune(vae: WanVideoVAE38) -> list[nn.Parameter]:
+def prepare_decoder_finetune(vae: WanVideoVAE) -> list[nn.Parameter]:
     vae.model.requires_grad_(False)
     vae.model.encoder.eval()
     vae.model.conv1.eval()
@@ -847,7 +873,7 @@ def build_scheduler(
 
 def save_checkpoint(
     path: str,
-    vae: WanVideoVAE38,
+    vae: WanVideoVAE,
     optimizer: Optional[torch.optim.Optimizer],
     scheduler: Optional[LRScheduler],
     step: int,
@@ -870,7 +896,7 @@ def save_checkpoint(
 
 def load_checkpoint(
     path: str,
-    vae: WanVideoVAE38,
+    vae: WanVideoVAE,
     optimizer: Optional[torch.optim.Optimizer],
     scheduler: Optional[LRScheduler],
     *,
@@ -909,10 +935,15 @@ def load_checkpoint(
     return int(payload.get("step", 0)), optimizer_state is not None
 
 
-def export_complete_vae(path: str, vae: WanVideoVAE38, step: int, metadata: dict[str, Any]) -> None:
+def export_complete_vae(
+    path: str,
+    vae: WanVideoVAE,
+    step: int,
+    metadata: dict[str, Any],
+) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     # Training uses FP32 master parameters, but FastWAM inference runs this VAE
-    # in BF16 and the original Wan2.2 VAE is distributed in BF16.  Quantize
+    # in BF16 and the original Wan VAEs are distributed in BF16. Quantize
     # only the final deployment export; resumable .pt checkpoints remain FP32.
     state = {
         key.removeprefix("model."): value.detach().to(
@@ -925,7 +956,7 @@ def export_complete_vae(path: str, vae: WanVideoVAE38, step: int, metadata: dict
         state,
         temporary,
         metadata={
-            "model": "Wan2.2_VAE",
+            "model": VAE_VARIANTS[metadata["vae_variant"]][1],
             "format": "pt",
             "dtype": "bfloat16",
             "finetuned_modules": "conv2,decoder",
@@ -969,7 +1000,7 @@ def rotation_angle_degrees(prediction: Tensor, target: Tensor) -> Tensor:
 
 @torch.no_grad()
 def evaluate(
-    vae: WanVideoVAE38,
+    vae: WanVideoVAE,
     store: EpisodeStore,
     eval_episodes: Sequence[EpisodeRef],
     stats: RothkoNormStats,
@@ -1117,7 +1148,7 @@ def train(args: argparse.Namespace) -> None:
         f"Norm stats: {args.norm_stats_path}; bounds="
         f"{stats.metadata.get('translation_abs_bounds_xyz_m')}", rank,
     )
-    vae = load_base_vae(args.base_vae, device, dtype)
+    vae = load_base_vae(args.base_vae, args.vae_variant, device, dtype)
     trainable = prepare_decoder_finetune(vae)
     non_fp32_trainable = [parameter.dtype for parameter in trainable if parameter.dtype != torch.float32]
     if non_fp32_trainable:
@@ -1222,6 +1253,7 @@ def train(args: argparse.Namespace) -> None:
         "max_steps": args.max_steps,
         "padded_windows_per_epoch": padded_windows_per_epoch,
         "base_vae": str(Path(args.base_vae).expanduser().resolve()),
+        "vae_variant": args.vae_variant,
         "norm_stats_path": str(Path(args.norm_stats_path).expanduser().resolve()),
         "norm_stats_metadata": stats.metadata,
         "center_loss_weight": args.center_loss_weight,
@@ -1380,9 +1412,10 @@ def train(args: argparse.Namespace) -> None:
                         vae, None, scheduler, step, metadata, include_optimizer=False,
                     )
                 if step % args.export_every == 0:
+                    _, vae_export_name = VAE_VARIANTS[args.vae_variant]
                     periodic_export_path = str(
                         Path(args.output_dir)
-                        / f"Wan2.2_VAE_libero_rothko_step{step:06d}.safetensors"
+                        / f"{vae_export_name}_libero_rothko_step{step:06d}.safetensors"
                     )
                     export_complete_vae(periodic_export_path, vae, step, metadata)
                     log(f"Exported complete periodic VAE: {periodic_export_path}", rank)
@@ -1416,8 +1449,10 @@ def train(args: argparse.Namespace) -> None:
     progress.close()
     barrier(is_distributed)
     if rank == 0:
+        _, vae_export_name = VAE_VARIANTS[args.vae_variant]
         export_path = args.export_safetensors or str(
-            Path(args.output_dir) / f"Wan2.2_VAE_libero_rothko_step{step:06d}.safetensors"
+            Path(args.output_dir)
+            / f"{vae_export_name}_libero_rothko_step{step:06d}.safetensors"
         )
         export_complete_vae(export_path, vae, step, metadata)
         log(f"Exported complete FastWAM-loadable VAE: {export_path}", rank)
@@ -1447,6 +1482,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-roots", nargs="+", help="Explicit dataset roots; overrides --data-root/--suites")
     parser.add_argument("--suites", nargs="+", choices=sorted(SUITE_DIRS), default=list(DEFAULT_SUITES))
     parser.add_argument("--base-vae", default=str(DEFAULT_BASE_VAE))
+    parser.add_argument(
+        "--vae-variant",
+        choices=sorted(VAE_VARIANTS),
+        default=DEFAULT_VAE_VARIANT,
+    )
     parser.add_argument("--norm-stats-path", default=str(DEFAULT_NORM_STATS))
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--export-safetensors")

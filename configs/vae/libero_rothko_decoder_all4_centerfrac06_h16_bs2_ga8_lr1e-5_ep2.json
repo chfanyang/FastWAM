@@ -8,6 +8,7 @@
     "libero_10"
   ],
   "base_vae": "/mnt/hwdata/cfy/FastWAM/checkpoints/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors",
+  "vae_variant": "wan2.2-ti2v-5b",
   "norm_stats_path": "/mnt/hwdata/cfy/FastWAM/data/libero_mujoco3.3.2/libero_rothko_region_symmetric_q99p95_h16_centerfrac06_224x448.pt",
   "output_dir": "/mnt/nodestor/cfy/runs/libero_rothko_vae_decoder_all4_centerfrac06_h16_bs2_ga8_lr1e-5_ep2",
   "export_safetensors": null,
