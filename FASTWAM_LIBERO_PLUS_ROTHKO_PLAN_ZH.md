@@ -1,6 +1,6 @@
 # FastWAM 对 LIBERO-Plus 的独立训练与评测适配方案
 
-> 文档状态：方案已确认并完成第二轮细节审查，代码尚未开始实施  
+> 文档状态：方案已确认；独立环境、assets、完整训练数据下载和只读数据审计已完成；side-channel 与模型适配尚未开始
 > 创建日期：2026-08-13  
 > 当前开发分支：`feat/libero-plus-support`  
 > LIBERO-Plus 源码：`third_party/LIBERO-plus`  
@@ -85,8 +85,8 @@ libero_10
 联合训练集共有 40 个基础任务。LIBERO-Plus 的 10,030 个任务是基于这些任务构造
 的扰动评测任务，不是 10,030 条独立训练技能。
 
-第一版加载一个完整 LeRobot dataset root，并采用数据集的完整有效窗口分布采样。
-因此 episode 更长、有效窗口更多的任务会
+第一版加载一个完整 LeRobot dataset root，并保持当前 FastWAM 的逐 frame 起点采样及
+episode 尾部 padding 行为。因此 episode 更长、frame 更多的任务会
 获得更高采样概率，并不保证四个 suite 或 40 个任务等权。若后续需要等权训练，
 应先恢复 episode 到 suite 的映射，再增加显式的 suite/task balanced sampler。
 
@@ -237,6 +237,47 @@ libero_10:      2519
 total:         10030
 ```
 
+### 3.1 第一阶段实际安装结果（2026-08-15）
+
+独立环境已经安装并通过实际环境 smoke test：
+
+```text
+conda env: /mnt/hwdata/cfy/miniconda3/envs/fastwam_libero_plus
+Plus source commit: 4976dc30028e805ff8094b55501d532c48fec182
+Plus local config: data/libero_plus/.libero_config/config.yaml
+LIBERO_CONFIG_PATH: /mnt/hwdata/cfy/FastWAM/data/libero_plus/.libero_config
+```
+
+由于 Plus 上游 `setup.py` 在当前 pip 下无法发现 namespace package，新环境使用
+editable compatibility mode 安装。额外依赖 `wand==0.7.2`、`scikit-image==0.25.2`
+和 ImageMagick 均只安装在 `fastwam_libero_plus` 中，没有修改系统包或原始
+`fastwam_libero` 环境。
+
+官方 assets 来自 Hugging Face `Sylvest/LIBERO-plus`：
+
+```text
+revision: dd2bd61b7d9a6fef1abc52d606e983b41886a149
+assets.zip size: 6,395,849,578 bytes
+assets.zip sha256: 96764a4bfbdaea98d4411598caeab235458318fe0f549611b93d1a323027b3cf
+installed path: third_party/LIBERO-plus/libero/libero/assets
+```
+
+PyTorch 2.6 将 `torch.load()` 的默认值改为 `weights_only=True`，而 LIBERO 的
+`.pruned_init` 是可信的 NumPy-backed pickle 数据。Plus benchmark 本地源码因此需要
+显式使用 `torch.load(..., weights_only=False)`。该最小修复目前位于被外层仓库忽略的
+Plus 子仓库中，进入正式代码适配前必须将它保存为可重放 patch，不能只依赖当前工作区。
+
+验证结果：
+
+```text
+原始 fastwam_libero 导入路径: third_party/LIBERO/libero/libero/__init__.py
+Plus fastwam_libero_plus 导入路径: third_party/LIBERO-plus/libero/libero/__init__.py
+libero_spatial / object / goal / 10: 2402 / 2518 / 2591 / 2519
+实际 smoke task init states: (50, 92)
+实际离屏渲染: agentview_image=(128, 128, 3), uint8
+实际零动作 step: reward=0.0, done=False
+```
+
 ## 4. 下载并验证训练数据
 
 计划使用 Hugging Face CLI 下载完整合并 LeRobot 数据集：
@@ -330,6 +371,71 @@ manifest，供数据审计、分组验证和结果解释使用。无法从官方
 unknown，而不是根据 episode 编号猜测。
 
 如果这些语义与原始 LIBERO 不一致，应停止转换并先修正 Plus 专用转换器。
+
+### 4.2 完整下载后的只读审计结果（2026-08-15）
+
+审计工具：`scripts/audit_libero_plus_dataset.py`。它只读取 parquet/metadata/video，
+不会改写训练数据。当前报告与分组 sidecar 为：
+
+```text
+data/libero_plus/libero_plus_lerobot_audit.json
+data/libero_plus/libero_plus_lerobot_source_manifest.jsonl
+```
+
+完整性检查结果：
+
+```text
+episodes / frames / tasks: 14,347 / 2,238,036 / 40
+fps: 20
+global/episode/frame/task index mismatch: 0 / 0 / 0 / 0
+NaN/Inf in state/action: 0 / 0
+每个任务抽查 front+wrist，共 80 个视频：帧数、分辨率、fps 全部匹配
+suite episode 数：spatial 3,750；object 4,085；goal 3,721；10 2,791
+```
+
+动作语义检查结果：
+
+- `observation.state[:6]` 与 EE xyz + absolute axis-angle 一致；
+- `observation.state[6:8]` 是 Panda 两指 qpos；
+- `action[:6]` 是 normalized delta OSC，位置响应逐轴相关系数约
+  `0.925/0.970/0.948`；
+- `action[6]` 只有 `-1/+1`，实测语义明确为 `-1=open、+1=close`；
+- pose action norm 小于等于 `0.01` 的 row 只占约 `0.1407%`，没有大量成功后静止尾段；
+- row-offset 相关性受专家动作平滑和 controller dynamics 影响，统计上 `action[t]` 与
+  `state[t]->state[t+1]` 的总 MSE 最低，但它不能单独证明采集代码是 pre-step 还是
+  post-step 记录；side-channel 写入前仍需保留一次 simulator/source-converter 语义验证。
+
+公开 metadata 的限制已经确认：
+
+- episode 只有 `episode_index/tasks/length`，没有 perturbation、difficulty、source ID；
+- 全部训练 episode 只保留 40 条 canonical instruction，没有 language rewrite 文本；
+- suite 可通过 40 个 canonical task 与原始 LIBERO metadata 精确匹配；
+- perturbation category 无法从当前合并发布版可靠恢复，sidecar 中应记为 unknown，不能猜；
+- 根目录 `norm_stats.json` 的 state mean 与 parquet 一致，但其中 `actions` stats 与实际
+  parquet `action` 列明显不一致，不能用于归一化当前 7D OSC action。
+
+最重要的审计发现是 replay 分组：
+
+```text
+14,347 episodes -> 1,681 unique source trajectories
+平均每条 source trajectory 有 8.535 个视觉 replay
+group size: 3x1, 4x8, 5x477, 8x3, 9x17, 10x1175
+同组 action 完全一致；同组 state 也完全一致；没有跨 task 的 group
+```
+
+source ID 定义为完整 little-endian float32 action trajectory 的 SHA256。固定 split
+按每个 task 内的 source group 做 seeded SHA256 排序，seed=42、val 比例约 5%：
+
+```text
+train: 1,603 source groups / 13,653 episodes / 40 tasks
+val:      78 source groups /    694 episodes / 40 tasks
+train-val source intersection: 0
+manifest SHA256: d47c97661b8934f11109276fec3c720b8c99f55d8b3051ebc86e66344db65ce3
+```
+
+这里仅修复 episode 的 train/val 归属。根据用户后续确认，第一版继续保留当前 reader 的
+逐 frame 起点、episode 尾部 replication padding 和 pad mask，不新增“只保留完整 17 帧
+窗口”的筛选，也不改变原始 LIBERO/RoboTwin 的默认采样。
 
 ## 5. 为 Rothko 增加 parquet side-channel
 
@@ -459,7 +565,8 @@ data/libero_plus/
 `scripts/compute_libero_rothko_norm_stats.py`，使其支持：
 
 - 一个完整合并 LeRobot dataset root；
-- `--all-windows`，枚举每个 episode 的全部有效 17 帧窗口；
+- `--all-sample-starts`，枚举与训练 reader 相同的全部 frame 起点，并对 episode 尾部使用
+  相同的 replication padding；
 - 输出 dataset metadata/hash、episode 数、窗口数和实际 Rothko 参数；
 - 输出每个 xyz channel 的 quantile bound、observed max 和 clipping ratio；
 - 将 `environment`/`benchmark` 标记为 `libero_plus`；
@@ -470,7 +577,7 @@ data/libero_plus/
 ```text
 quantile: 0.9995，即取 |relative_xyz| 的 Q99.95 作为对称边界
 horizon: 16
-sampling: all valid windows
+sampling: all frame starts with the same episode-tail padding as training
 center_frac: 0.6（第一版固定值）
 ```
 
@@ -567,21 +674,21 @@ camera keys 和新增 raw side-channel 能通过现有通用接口读取。
 
 ### 8.3 采样策略
 
-第一版保持 valid-window-weighted 自然采样。实现时额外记录：
+第一版保持当前 FastWAM 的 frame-weighted 自然采样。实现时额外记录：
 
 - 每个 task 的 episode 数；
-- 每个 task 的有效 17 帧窗口数；
+- 每个 task 的 frame/sample-start 数和会触发 padding 的起点数；
 - 每个 suite 的窗口占比；
 - 一个 epoch 的总 sample 数。
 
 这能明确回答训练中的任务分布。后续如果启用 balanced sampler，应作为新配置，
 不能静默改变第一版结果。
 
-当前 `BaseLerobotDataset` 的长度接近 frame 数，episode 尾部会通过 padding 形成不完整
-17 帧窗口；`skip_padding_as_possible` 只是随机重试，并不能定义确定的 valid-window
-数据集。第一版应在构建索引时只保留 `start <= episode_length - 17` 的窗口，使训练样本、
-stats 的 `all valid windows` 和 epoch 定义完全一致。训练中不应随机把尾部 padding sample
-替换成另一个 task 的样本。若后续确实要训练 padding chunk，必须作为单独实验显式开启。
+当前 `BaseLerobotDataset` 的长度接近 frame 数，episode 尾部通过 replication padding
+形成不足 17 个真实 observation 的窗口，并用 `image_is_pad/action_is_pad` 标记。用户已确认
+第一版保留这个既有行为，不增加 complete-window-only 筛选；stats 也必须复现同样的 sample
+起点与 padding 规则，避免训练分布和 stats 分布不一致。`skip_padding_as_possible` 仍保持
+关闭，不能随机把一个尾部样本替换成另一个 task 的样本。
 
 ### 8.4 固定验证集与防止 replay 泄漏
 
@@ -592,11 +699,12 @@ stats 的 `all valid windows` 和 epoch 定义完全一致。训练中不应随�
 - validation sample 顺序；
 - 每次验证的样本数。
 
-更关键的是，Plus 中多个扰动 replay 可能来自同一条原始专家轨迹。正式 train/val split
+更关键的是，Plus 中多个扰动 replay 来自同一条专家轨迹。正式 train/val split
 必须按 `source trajectory ID` 分组，而不是随机按 episode 切分，否则同一动作轨迹的不同
-视觉扰动可能同时出现在 train 和 val 中，导致验证指标虚高。若合并发布版无法恢复这个 ID，
-固定验证只能称为训练健康度监控，不能解释为独立泛化验证；最终结论以 10,030-task 在线
-评测为准。
+视觉扰动会同时出现在 train 和 val 中，导致验证指标虚高。当前已用完全一致的 action
+trajectory SHA256 恢复出 1,681 个 source group，并生成固定 95%/5% 分组 sidecar；loader
+会拒绝同一 source ID 跨 split。即便如此，离线验证仍主要用于训练健康度监控，最终结论以
+10,030-task 在线评测为准。
 
 ## 9. 训练前 smoke test
 
@@ -623,9 +731,9 @@ Rothko canvas:  [B,3,17,224,448]
 - 横向两个 Rothko tile 完全一致；
 - padding mask 与 episode 尾部一致。
 
-因为第一版索引只包含完整窗口，正常训练 sample 的三种 padding mask 应全为 false；这里
-保留 padding 检查，是为了验证 reader 在显式边界测试时不会跨 episode，而不是允许 padding
-样本混入正式训练。
+第一版明确保留 episode 尾部 padding 样本。因此 dataset smoke test 需要分别覆盖普通起点
+和尾部起点，确认尾部 observation/action 只在本 episode 内 replication、pad mask 数量正确，
+且绝不会读取下一个 episode 的任何帧。
 
 ### 9.2 Codec roundtrip test
 
@@ -1009,8 +1117,8 @@ identity，而不是仅用可能在不同 suite/version 中重复的 `task_id`�
 9. 恢复并保存 episode 的 suite/category/source-trajectory sidecar manifest；
 10. 实现 Plus side-channel 转换并完成 dry-run；
 11. 批量写入并 verify 全部 parquet/metadata；
-12. 建立确定的 valid-window index 和按 source trajectory 分组的验证 split；
-13. 用全部有效窗口计算 Plus Rothko stats；
+12. 接入已生成的 source-trajectory 分组验证 split，并保持既有尾部 padding 采样；
+13. 用与训练相同的全部 frame 起点及 padding 规则计算 Plus Rothko stats；
 14. 计算实际全部唯一 prompt 的独立文本 embedding cache；
 15. 新增 Plus data/model/task 配置；
 16. 去掉 video-only 路径对 processor dataset stats 的依赖；
@@ -1034,8 +1142,8 @@ identity，而不是仅用可能在不同 suite/version 中重复的 `task_id`�
 - side-channel 全量写入和 verify 无错误；
 - video-only Rothko train/eval 不再读取 `dataset_stats.json`；
 - Plus Rothko stats 只来自 Plus 数据；
-- 全部有效窗口参与正式 Rothko stats 计算；
-- 正式训练只采完整 17 帧窗口，不随机替换 padded sample；
+- 全部训练 sample 起点按相同尾部 padding 规则参与正式 Rothko stats 计算；
+- 正式训练保留既有 episode 尾部 padding，且不会跨 episode 或随机替换 padded sample；
 - 数据集实际使用的全部唯一 prompt 均有独立 cache；
 - 固定验证 split/noise/timestep 可复现，且已说明是否能按 source trajectory 防泄漏；
 - 一步 train/val/save/reload 数值正常；

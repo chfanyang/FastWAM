@@ -1,0 +1,53 @@
+# @package _global_
+
+defaults:
+  - sim_libero
+  - _self_
+
+# Official LIBERO-Plus protocol evaluates each generated perturbation once.
+EVALUATION:
+  num_trials: 1
+  output_dir: ./evaluate_results/libero_plus/${hydra:runtime.choices.task}/${now:%Y%m%d_%H%M%S}
+  replan_steps: 16
+  use_action_ensembler: false
+  # A full Plus run has 10,030 perturbations. Keep bulk artifacts disabled by
+  # default; they can be enabled for a smoke test or a diagnostic subset.
+  save_rollout_videos: false
+  save_prediction_videos: false
+
+MULTIRUN:
+  task_suite_names:
+    - libero_spatial
+    - libero_object
+    - libero_goal
+    - libero_10
+  # null means use CUDA_VISIBLE_DEVICES, or [0, ..., num_gpus-1] when unset.
+  gpu_ids: null
+  num_gpus: 8
+  # Persistent model workers placed on each physical GPU. Increasing this can
+  # overlap environment stepping with inference when memory permits.
+  workers_per_gpu: 1
+  # round_robin preserves the original global task order. suite_parallel
+  # assigns each suite to dedicated worker(s), so all suites advance together.
+  assignment_mode: round_robin
+  # This robosuite version addresses EGL devices by physical index. Rendering
+  # on GPU 0 while placing each model on its assigned GPU is the tested setup.
+  render_gpu_id: 0
+  resume: true
+  continue_on_error: true
+  # Optional bounded subsets for smoke tests. End is exclusive.
+  task_start: 0
+  task_end: null
+  max_tasks_per_suite: null
+
+WORKER:
+  task_file: null
+  worker_id: 0
+  continue_on_error: ${MULTIRUN.continue_on_error}
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
