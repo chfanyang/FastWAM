@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 
@@ -32,13 +33,138 @@ from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
 logger = get_logger(__name__)
 
 
+LATENT_LAYOUT_RGB_THEN_RAYMAP = "rgb_then_raymap"
+LATENT_LAYOUT_RGB_RAYMAP_CHANNEL = "rgb_raymap_channel"
+SUPPORTED_LATENT_LAYOUTS = {
+    LATENT_LAYOUT_RGB_THEN_RAYMAP,
+    LATENT_LAYOUT_RGB_RAYMAP_CHANNEL,
+}
+CHANNEL_LAYOUT_IO_INIT_DUPLICATE_SQRT2 = (
+    "duplicate_sqrt2_input_duplicate_output"
+)
+CHANNEL_LAYOUT_IO_INIT_RGB_PRESERVE = (
+    "rgb_preserve_zero_ray_input_duplicate_output"
+)
+SUPPORTED_CHANNEL_LAYOUT_IO_INITS = {
+    CHANNEL_LAYOUT_IO_INIT_DUPLICATE_SQRT2,
+    CHANNEL_LAYOUT_IO_INIT_RGB_PRESERVE,
+}
+
+
+@torch.no_grad()
+def _expand_video_dit_io_for_rgb_raymap_channels(
+    dit: nn.Module,
+    *,
+    target_channels: int,
+    init_mode: str = CHANNEL_LAYOUT_IO_INIT_DUPLICATE_SQRT2,
+) -> None:
+    """Expand a pretrained Wan DiT's latent-facing layers by a factor of two.
+
+    ``duplicate_sqrt2_input_duplicate_output`` duplicates the input convolution
+    across the RGB/Rothko halves and scales both copies by ``1/sqrt(2)``.
+
+    ``rgb_preserve_zero_ray_input_duplicate_output`` copies the pretrained
+    input convolution into the RGB half and initializes the Rothko half to
+    zero. This exactly preserves the pretrained RGB patch features at step
+    zero while leaving both halves trainable.
+
+    Both modes duplicate output rows *within every spatiotemporal patch
+    position* so unpatchify retains the expected
+    ``[patch_t, patch_h, patch_w, channel]`` ordering.
+    """
+    init_mode = str(init_mode)
+    if init_mode not in SUPPORTED_CHANNEL_LAYOUT_IO_INITS:
+        raise ValueError(
+            f"Unsupported channel-layout I/O init_mode={init_mode!r}; "
+            f"expected one of {sorted(SUPPORTED_CHANNEL_LAYOUT_IO_INITS)}."
+        )
+    patch_embedding = getattr(dit, "patch_embedding", None)
+    head = getattr(getattr(dit, "head", None), "head", None)
+    patch_size = tuple(int(value) for value in getattr(dit, "patch_size", ()))
+    if not isinstance(patch_embedding, nn.Conv3d) or not isinstance(
+        head, nn.Linear
+    ):
+        raise TypeError(
+            "Channel layout requires Conv3d patch embedding and Linear output head."
+        )
+    if len(patch_size) != 3:
+        raise ValueError(f"Invalid DiT patch size for channel expansion: {patch_size}")
+
+    source_channels = int(patch_embedding.in_channels)
+    target_channels = int(target_channels)
+    if target_channels != 2 * source_channels:
+        raise ValueError(
+            "RGB/Rothko channel layout must double the pretrained DiT latent "
+            f"channels, got source={source_channels}, target={target_channels}."
+        )
+    patch_volume = math.prod(patch_size)
+    if head.out_features != source_channels * patch_volume:
+        raise ValueError(
+            "Pretrained DiT output head is inconsistent with its input channels: "
+            f"out_features={head.out_features}, source_channels={source_channels}, "
+            f"patch_volume={patch_volume}."
+        )
+
+    expanded_patch = nn.Conv3d(
+        in_channels=target_channels,
+        out_channels=patch_embedding.out_channels,
+        kernel_size=patch_embedding.kernel_size,
+        stride=patch_embedding.stride,
+        padding=patch_embedding.padding,
+        dilation=patch_embedding.dilation,
+        groups=patch_embedding.groups,
+        bias=patch_embedding.bias is not None,
+        padding_mode=patch_embedding.padding_mode,
+        device=patch_embedding.weight.device,
+        dtype=patch_embedding.weight.dtype,
+    )
+    if init_mode == CHANNEL_LAYOUT_IO_INIT_DUPLICATE_SQRT2:
+        scaled_weight = patch_embedding.weight / math.sqrt(2.0)
+        expanded_patch.weight[:, :source_channels].copy_(scaled_weight)
+        expanded_patch.weight[:, source_channels:].copy_(scaled_weight)
+    else:
+        expanded_patch.weight[:, :source_channels].copy_(patch_embedding.weight)
+        expanded_patch.weight[:, source_channels:].zero_()
+    if patch_embedding.bias is not None:
+        expanded_patch.bias.copy_(patch_embedding.bias)
+
+    expanded_head = nn.Linear(
+        in_features=head.in_features,
+        out_features=target_channels * patch_volume,
+        bias=head.bias is not None,
+        device=head.weight.device,
+        dtype=head.weight.dtype,
+    )
+    source_weight = head.weight.reshape(
+        patch_volume, source_channels, head.in_features
+    )
+    expanded_weight = torch.cat((source_weight, source_weight), dim=1)
+    expanded_head.weight.copy_(expanded_weight.reshape_as(expanded_head.weight))
+    if head.bias is not None:
+        source_bias = head.bias.reshape(patch_volume, source_channels)
+        expanded_bias = torch.cat((source_bias, source_bias), dim=1)
+        expanded_head.bias.copy_(expanded_bias.reshape_as(expanded_head.bias))
+
+    dit.patch_embedding = expanded_patch
+    dit.head.head = expanded_head
+    dit.in_dim = target_channels
+    logger.info(
+        "Expanded pretrained video DiT latent I/O for RGB/Rothko channel layout: "
+        "channels=%d->%d init=%s",
+        source_channels,
+        target_channels,
+        init_mode,
+    )
+
+
 class FastWAMVideoOnlyRaymap(torch.nn.Module):
     """Wan video expert jointly predicting future RGB and Rothko raymaps.
 
-    RGB and Rothko are independently encoded by the same frozen Wan VAE, then
-    concatenated as two equally-sized latent-time blocks.  The two frame-zero
-    latents are clean conditions; all future latents are jointly denoised by a
-    single pretrained Wan video DiT using continuous temporal RoPE positions.
+    RGB and Rothko are independently encoded by the same frozen Wan VAE. The
+    legacy/default layout concatenates them as two latent-time blocks; the
+    opt-in channel layout pairs both modalities at each latent time step. Clean
+    frame-zero conditions and all noisy future latents are jointly processed by
+    a single pretrained Wan video DiT.
     """
     is_visual_action_model = True
     legacy_video_attention_mask_mode = "condition_frames_causal"
@@ -62,6 +188,8 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         raymap_representation: str = "rothko",
         rothko_norm_stats: Optional[str] = None,
         rothko_config: Optional[dict[str, Any]] = None,
+        latent_layout: str = LATENT_LAYOUT_RGB_THEN_RAYMAP,
+        channel_io_init: str = CHANNEL_LAYOUT_IO_INIT_DUPLICATE_SQRT2,
         allow_vae_mismatch: bool = False,
     ):
         super().__init__()
@@ -93,13 +221,57 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         self.num_latent_frames_per_modality = (
             self.num_pixel_frames - 1
         ) // temporal_factor + 1
-        self.condition_latent_indices = (
-            0,
-            self.num_latent_frames_per_modality,
+        self.vae_latent_channels = int(self.vae.model.z_dim)
+        self.latent_layout = str(latent_layout)
+        if self.latent_layout not in SUPPORTED_LATENT_LAYOUTS:
+            raise ValueError(
+                f"Unsupported latent_layout={self.latent_layout!r}; "
+                f"expected one of {sorted(SUPPORTED_LATENT_LAYOUTS)}."
+            )
+        if self.latent_layout == LATENT_LAYOUT_RGB_THEN_RAYMAP:
+            self.condition_latent_indices = (
+                0,
+                self.num_latent_frames_per_modality,
+            )
+            joint_latent_frames = 2 * self.num_latent_frames_per_modality
+            expected_dit_channels = self.vae_latent_channels
+            self.pretrained_io_expansion = None
+        else:
+            channel_io_init = str(channel_io_init)
+            if channel_io_init not in SUPPORTED_CHANNEL_LAYOUT_IO_INITS:
+                raise ValueError(
+                    f"Unsupported channel_io_init={channel_io_init!r}; expected "
+                    f"one of {sorted(SUPPORTED_CHANNEL_LAYOUT_IO_INITS)}."
+                )
+            self.condition_latent_indices = (0,)
+            joint_latent_frames = self.num_latent_frames_per_modality
+            expected_dit_channels = 2 * self.vae_latent_channels
+            self.pretrained_io_expansion = channel_io_init
+            attention_mode = str(
+                getattr(self.video_expert, "video_attention_mask_mode", "")
+            )
+            if attention_mode != "bidirectional":
+                raise ValueError(
+                    "The first RGB/Rothko channel-layout implementation requires "
+                    "video_attention_mask_mode='bidirectional', got "
+                    f"{attention_mode!r}."
+                )
+        self.temporal_rope_mode = f"continuous_0_{joint_latent_frames - 1}"
+
+        actual_dit_in = int(getattr(self.video_expert, "in_dim", -1))
+        patch_volume = math.prod(
+            tuple(int(value) for value in self.video_expert.patch_size)
         )
-        self.temporal_rope_mode = (
-            f"continuous_0_{2 * self.num_latent_frames_per_modality - 1}"
-        )
+        actual_dit_out = int(self.video_expert.head.head.out_features) // patch_volume
+        if (
+            actual_dit_in != expected_dit_channels
+            or actual_dit_out != expected_dit_channels
+        ):
+            raise ValueError(
+                "DiT latent I/O channels do not match the selected layout: "
+                f"layout={self.latent_layout}, expected={expected_dit_channels}, "
+                f"in={actual_dit_in}, out={actual_dit_out}."
+            )
 
         self.train_scheduler = WanContinuousFlowMatchScheduler(
             num_train_timesteps=num_train_timesteps,
@@ -167,12 +339,41 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         raymap_representation: str = "rothko",
         rothko_norm_stats: Optional[str] = None,
         rothko_config: Optional[dict[str, Any]] = None,
+        latent_layout: str = LATENT_LAYOUT_RGB_THEN_RAYMAP,
+        channel_io_init: str = CHANNEL_LAYOUT_IO_INIT_DUPLICATE_SQRT2,
         allow_vae_mismatch: bool = False,
     ) -> "FastWAMVideoOnlyRaymap":
         if video_dit_config is None:
             raise ValueError("`video_dit_config` is required.")
         if "text_dim" not in video_dit_config:
             raise ValueError("`video_dit_config['text_dim']` is required.")
+        latent_layout = str(latent_layout)
+        if latent_layout not in SUPPORTED_LATENT_LAYOUTS:
+            raise ValueError(
+                f"Unsupported latent_layout={latent_layout!r}; "
+                f"expected one of {sorted(SUPPORTED_LATENT_LAYOUTS)}."
+            )
+        channel_io_init = str(channel_io_init)
+        if channel_io_init not in SUPPORTED_CHANNEL_LAYOUT_IO_INITS:
+            raise ValueError(
+                f"Unsupported channel_io_init={channel_io_init!r}; expected one "
+                f"of {sorted(SUPPORTED_CHANNEL_LAYOUT_IO_INITS)}."
+            )
+        load_dit_config = dict(video_dit_config)
+        if (
+            latent_layout == LATENT_LAYOUT_RGB_RAYMAP_CHANNEL
+            and not skip_dit_load_from_pretrain
+        ):
+            target_in = int(load_dit_config["in_dim"])
+            target_out = int(load_dit_config["out_dim"])
+            if target_in % 2 or target_out % 2:
+                raise ValueError(
+                    "Channel-layout DiT in_dim/out_dim must be even so the original "
+                    f"Wan I/O can be loaded first, got {target_in}/{target_out}."
+                )
+            load_dit_config["in_dim"] = target_in // 2
+            load_dit_config["out_dim"] = target_out // 2
+
         components = load_wan_video_components(
             device=device,
             torch_dtype=torch_dtype,
@@ -182,10 +383,19 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             tokenizer_max_len=tokenizer_max_len,
             redirect_common_files=redirect_common_files,
             vae_safetensors_path=vae_safetensors_path,
-            dit_config=video_dit_config,
+            dit_config=load_dit_config,
             skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
             load_text_encoder=load_text_encoder,
         )
+        if (
+            latent_layout == LATENT_LAYOUT_RGB_RAYMAP_CHANNEL
+            and not skip_dit_load_from_pretrain
+        ):
+            _expand_video_dit_io_for_rgb_raymap_channels(
+                components.dit,
+                target_channels=int(video_dit_config["in_dim"]),
+                init_mode=channel_io_init,
+            )
         model = cls(
             video_expert=components.dit,
             vae=components.vae,
@@ -204,6 +414,8 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             raymap_representation=raymap_representation,
             rothko_norm_stats=rothko_norm_stats,
             rothko_config=rothko_config,
+            latent_layout=latent_layout,
+            channel_io_init=channel_io_init,
             allow_vae_mismatch=allow_vae_mismatch,
         )
         model.model_paths = {
@@ -278,6 +490,56 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             .float()
             .clamp(-1, 1)
         )
+
+    def _join_rgb_raymap_latents(
+        self,
+        rgb_latents: torch.Tensor,
+        raymap_latents: torch.Tensor,
+    ) -> torch.Tensor:
+        if rgb_latents.shape != raymap_latents.shape:
+            raise ValueError(
+                "RGB/Rothko latent shapes must match before joining, got "
+                f"{tuple(rgb_latents.shape)} and {tuple(raymap_latents.shape)}."
+            )
+        if self.latent_layout == LATENT_LAYOUT_RGB_THEN_RAYMAP:
+            return torch.cat((rgb_latents, raymap_latents), dim=2)
+        return torch.cat((rgb_latents, raymap_latents), dim=1)
+
+    def _split_rgb_raymap_latents(
+        self,
+        joint_latents: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.latent_layout == LATENT_LAYOUT_RGB_THEN_RAYMAP:
+            expected_frames = 2 * self.num_latent_frames_per_modality
+            if joint_latents.shape[2] != expected_frames:
+                raise ValueError(
+                    f"Expected {expected_frames} joint latent frames, got "
+                    f"{joint_latents.shape[2]}."
+                )
+            return joint_latents.split(self.num_latent_frames_per_modality, dim=2)
+        expected_channels = 2 * self.vae_latent_channels
+        if joint_latents.shape[1] != expected_channels:
+            raise ValueError(
+                f"Expected {expected_channels} joint latent channels, got "
+                f"{joint_latents.shape[1]}."
+            )
+        return joint_latents.split(self.vae_latent_channels, dim=1)
+
+    def _set_clean_conditions(
+        self,
+        joint_latents: torch.Tensor,
+        rgb_condition: torch.Tensor,
+        raymap_condition: torch.Tensor,
+    ) -> None:
+        if self.latent_layout == LATENT_LAYOUT_RGB_THEN_RAYMAP:
+            joint_latents[:, :, 0:1] = rgb_condition
+            ray_condition_index = self.num_latent_frames_per_modality
+            joint_latents[
+                :, :, ray_condition_index : ray_condition_index + 1
+            ] = raymap_condition
+            return
+        joint_condition = torch.cat((rgb_condition, raymap_condition), dim=1)
+        joint_latents[:, :, 0:1] = joint_condition
 
     @staticmethod
     def _video_tensor_to_pil(video: torch.Tensor) -> list[Image.Image]:
@@ -364,7 +626,9 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             "context_mask": context_mask,
             "rgb_latents": rgb_latents,
             "raymap_latents": raymap_latents,
-            "joint_latents": torch.cat((rgb_latents, raymap_latents), dim=2),
+            "joint_latents": self._join_rgb_raymap_latents(
+                rgb_latents, raymap_latents
+            ),
             "image_is_pad": self._optional_bool_to_device(
                 sample.get("image_is_pad")
             ),
@@ -455,11 +719,14 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             inputs["context"],
             inputs["context_mask"],
         )
-        split = self.num_latent_frames_per_modality
-        prediction_rgb = prediction[:, :, 1:split]
-        target_rgb = target[:, :, 1:split]
-        prediction_raymap = prediction[:, :, split + 1 : 2 * split]
-        target_raymap = target[:, :, split + 1 : 2 * split]
+        prediction_rgb_all, prediction_raymap_all = self._split_rgb_raymap_latents(
+            prediction
+        )
+        target_rgb_all, target_raymap_all = self._split_rgb_raymap_latents(target)
+        prediction_rgb = prediction_rgb_all[:, :, 1:]
+        target_rgb = target_rgb_all[:, :, 1:]
+        prediction_raymap = prediction_raymap_all[:, :, 1:]
+        target_raymap = target_raymap_all[:, :, 1:]
         rgb_valid = self._latent_future_valid_mask(
             inputs["image_is_pad"], batch_size
         )
@@ -547,23 +814,23 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             if seed is None
             else torch.Generator(device=rand_device).manual_seed(seed)
         )
+        joint_channels = (
+            self.vae_latent_channels
+            if self.latent_layout == LATENT_LAYOUT_RGB_THEN_RAYMAP
+            else 2 * self.vae_latent_channels
+        )
+        joint_frames = (
+            2 * self.num_latent_frames_per_modality
+            if self.latent_layout == LATENT_LAYOUT_RGB_THEN_RAYMAP
+            else self.num_latent_frames_per_modality
+        )
         latents = torch.randn(
-            (
-                1,
-                int(self.vae.model.z_dim),
-                2 * self.num_latent_frames_per_modality,
-                latent_height,
-                latent_width,
-            ),
+            (1, joint_channels, joint_frames, latent_height, latent_width),
             generator=generator,
             device=rand_device,
             dtype=torch.float32,
         ).to(device=self.device, dtype=self.torch_dtype)
-        latents[:, :, 0:1] = rgb_condition
-        ray_condition_index = self.num_latent_frames_per_modality
-        latents[:, :, ray_condition_index : ray_condition_index + 1] = (
-            raymap_condition
-        )
+        self._set_clean_conditions(latents, rgb_condition, raymap_condition)
 
         if context is None or context_mask is None:
             if prompt is None:
@@ -597,18 +864,11 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                 latents, timestep, context, context_mask
             )
             latents = self.infer_scheduler.step(prediction, delta, latents)
-            latents[:, :, 0:1] = rgb_condition
-            latents[
-                :,
-                :,
-                ray_condition_index : ray_condition_index + 1,
-            ] = raymap_condition
+            self._set_clean_conditions(latents, rgb_condition, raymap_condition)
 
-        split = self.num_latent_frames_per_modality
-        decoded_rgb = self._decode_video_tensor(latents[:, :, :split], tiled=tiled)
-        decoded_raymap = self._decode_video_tensor(
-            latents[:, :, split:], tiled=tiled
-        )
+        rgb_latents, raymap_latents = self._split_rgb_raymap_latents(latents)
+        decoded_rgb = self._decode_video_tensor(rgb_latents, tiled=tiled)
+        decoded_raymap = self._decode_video_tensor(raymap_latents, tiled=tiled)
         result: dict[str, Any] = {
             "video": self._video_tensor_to_pil(decoded_rgb[0]),
             "video_tensor": decoded_rgb.cpu(),
@@ -704,7 +964,8 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             "dataset_stats_sha256": self.dataset_stats_sha256,
             "raymap_representation": self.raymap_representation,
             "action_horizon": self.action_horizon,
-            "latent_layout": "rgb_then_raymap",
+            "latent_layout": self.latent_layout,
+            "pretrained_io_expansion": self.pretrained_io_expansion,
             "temporal_rope_mode": self.temporal_rope_mode,
             "condition_latent_indices": list(self.condition_latent_indices),
             "video_attention_mask_mode": video_attention_mask_mode,
@@ -1034,7 +1295,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
 
         expected_metadata = {
             "action_horizon": self.action_horizon,
-            "latent_layout": "rgb_then_raymap",
+            "latent_layout": self.latent_layout,
             "temporal_rope_mode": self.temporal_rope_mode,
             "condition_latent_indices": list(self.condition_latent_indices),
         }
@@ -1045,6 +1306,13 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                     f"Checkpoint metadata mismatch for {key}: "
                     f"checkpoint={actual!r}, model={expected!r}."
                 )
+        checkpoint_io_expansion = visual_config.get("pretrained_io_expansion")
+        if checkpoint_io_expansion != self.pretrained_io_expansion:
+            raise ValueError(
+                "Checkpoint pretrained I/O expansion mismatch: "
+                f"checkpoint={checkpoint_io_expansion!r}, "
+                f"model={self.pretrained_io_expansion!r}."
+            )
         checkpoint_representation = visual_config.get("raymap_representation")
         if checkpoint_representation is None:
             # Video-only checkpoints created before LIBERO support are

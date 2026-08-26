@@ -12,11 +12,20 @@ class _DummyVideoExpert(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.weight = torch.nn.Parameter(torch.zeros(()))
+        self.in_dim = 16
+        self.patch_size = (1, 2, 2)
+        self.head = torch.nn.Module()
+        self.head.head = torch.nn.Linear(1, 16 * 4, bias=False)
 
 
 class _DummyVae(torch.nn.Module):
     temporal_downsample_factor = 4
     upsampling_factor = 8
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.z_dim = 16
 
 
 def _stats(height: int, width: int, metadata: dict) -> RothkoNormStats:

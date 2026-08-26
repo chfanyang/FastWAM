@@ -176,6 +176,8 @@ def create_fastwam_video_only_raymap(
     raymap_representation: str = "rothko",
     rothko_norm_stats: str | None = None,
     rothko_config=None,
+    latent_layout: str = "rgb_then_raymap",
+    channel_io_init: str = "duplicate_sqrt2_input_duplicate_output",
     allow_vae_mismatch: bool = False,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
@@ -228,6 +230,8 @@ def create_fastwam_video_only_raymap(
         raymap_representation=str(raymap_representation),
         rothko_norm_stats=rothko_norm_stats,
         rothko_config=rothko_config,
+        latent_layout=str(latent_layout),
+        channel_io_init=str(channel_io_init),
         allow_vae_mismatch=bool(allow_vae_mismatch),
     )
 

@@ -1,0 +1,20 @@
+defaults:
+  - fastwam_video_only_libero_rothko_wan21_1_3b
+  - _self_
+
+# Experimental channel-concatenation layout:
+#   RGB [B,16,5,H,W] + Rothko [B,16,5,H,W]
+#     -> joint [B,32,5,H,W]
+# This is opt-in and leaves the legacy/default rgb_then_raymap time-block
+# layout unchanged for all existing configurations and checkpoints.
+latent_layout: rgb_raymap_channel
+# Preserve the exact initialization used by the existing channel experiment
+# and its checkpoints. New RGB-preserving experiments override this explicitly.
+channel_io_init: duplicate_sqrt2_input_duplicate_output
+
+video_dit_config:
+  in_dim: 32
+  out_dim: 32
+  # Match the original Wan video denoiser: every joint spatiotemporal token can
+  # attend bidirectionally to every other joint token.
+  video_attention_mask_mode: bidirectional

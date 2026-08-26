@@ -1,0 +1,8 @@
+defaults:
+  - fastwam_video_only_libero_rothko_wan21_1_3b_channel
+  - _self_
+
+# Experimental pretrained-preserving channel initialization. At step zero the
+# RGB half of the expanded patch embedding exactly matches pretrained Wan2.1,
+# while the Rothko half starts at zero. Both halves remain fully trainable.
+channel_io_init: rgb_preserve_zero_ray_input_duplicate_output
