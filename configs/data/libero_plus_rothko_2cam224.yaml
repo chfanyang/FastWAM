@@ -1,0 +1,123 @@
+train:
+  _target_: fastwam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
+  dataset_dirs:
+    - ./data/libero_plus/libero_plus_lerobot
+  shape_meta:
+    images:
+      - key: front
+        raw_shape: [3, 256, 256]
+        shape: [3, 224, 224]
+      - key: wrist
+        raw_shape: [3, 256, 256]
+        shape: [3, 224, 224]
+    action:
+      - key: default
+        raw_shape: 7
+        shape: 7
+    state:
+      - key: default
+        raw_shape: 8
+        shape: 8
+  raw_action_meta:
+    - key: default
+      raw_shape: 7
+    - key: osc_target_pose_wxyz
+      raw_shape: 7
+    - key: gripper_open
+      raw_shape: 1
+  raw_state_meta:
+    - key: ee_pose_wxyz
+      raw_shape: 7
+    - key: gripper_open
+      raw_shape: 1
+  num_frames: 17
+  global_sample_stride: 1
+  action_video_freq_ratio: 1
+  video_size: [224, 448]
+  camera_key: null
+  val_set_proportion: 0.0
+  is_training_set: true
+  episode_split_manifest: ./data/libero_plus/libero_plus_lerobot_source_manifest_val02_seed42.jsonl
+  episode_split: train
+  # The current video-only model has no proprio encoder or action-conditioned
+  # DiT, so these processor-normalized tensors do not enter the loss. Keep the
+  # clean-LIBERO file as the checkpoint-compatible processor identity instead
+  # of recomputing unused Plus processor statistics.
+  pretrained_norm_stats: ./data/libero_mujoco3.3.2/dataset_stats.json
+  skip_padding_as_possible: false
+  sample_error_mode: raise
+  concat_multi_camera: horizontal
+  raymap_representation: libero_rothko
+  # Opt-in Plus behavior. Existing LIBERO configs omit this key and continue
+  # reading their already-compatible action[..., -1] values.
+  libero_action_gripper_key: gripper_open
+  # Keep the Rothko pixel scale learned by both clean-LIBERO initialization
+  # checkpoints. Full-window Plus auditing found <0.05% clipping on every
+  # translation axis for both train and held-out validation splits.
+  rothko_norm_stats: ./data/libero_mujoco3.3.2/libero_rothko_region_symmetric_q99p95_h16_224x448.pt
+  rothko_config:
+    image_height: 224
+    image_width: 448
+    tile_height: 224
+    tile_width: 224
+    focal: 0.2
+    center_scale: 1.0
+    dir_scale: 1.0
+    center_frac: 0.5
+    boundary_margin: 8
+    outer_margin: 8
+    duplicate_horizontal: true
+  processor:
+    _target_: fastwam.datasets.lerobot.processors.fastwam_processor.FastWAMProcessor
+    shape_meta: ${data.train.shape_meta}
+    num_obs_steps: ${data.train.num_frames}
+    num_output_cameras: 2
+    action_output_dim: 7
+    proprio_output_dim: 8
+    delta_action_dim_mask:
+      default: [true, true, true, true, true, true, false]
+    action_state_transforms: null
+    use_stepwise_action_norm: false
+    norm_default_mode: min/max
+    norm_exception_mode: null
+    action_state_merger:
+      _target_: fastwam.datasets.lerobot.transforms.action_state_merger.ConcatLeftAlign
+    train_transforms:
+      - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+      - _target_: torchvision.transforms.Resize
+        size: [224, 224]
+        antialias: true
+    val_transforms:
+      - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+      - _target_: torchvision.transforms.Resize
+        size: [224, 224]
+        antialias: true
+  text_embedding_cache_dir: ./data/text_embeds_cache/libero_plus
+  context_len: 128
+
+val:
+  _target_: fastwam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
+  dataset_dirs: ${data.train.dataset_dirs}
+  shape_meta: ${data.train.shape_meta}
+  raw_action_meta: ${data.train.raw_action_meta}
+  raw_state_meta: ${data.train.raw_state_meta}
+  num_frames: ${data.train.num_frames}
+  global_sample_stride: ${data.train.global_sample_stride}
+  action_video_freq_ratio: ${data.train.action_video_freq_ratio}
+  video_size: ${data.train.video_size}
+  camera_key: ${data.train.camera_key}
+  val_set_proportion: 0.0
+  is_training_set: false
+  episode_split_manifest: ${data.train.episode_split_manifest}
+  episode_split: val
+  pretrained_norm_stats: ${data.train.pretrained_norm_stats}
+  skip_padding_as_possible: ${data.train.skip_padding_as_possible}
+  sample_error_mode: raise
+  concat_multi_camera: ${data.train.concat_multi_camera}
+  raymap_representation: ${data.train.raymap_representation}
+  libero_action_gripper_key: ${data.train.libero_action_gripper_key}
+  rothko_norm_stats: ${data.train.rothko_norm_stats}
+  rothko_config: ${data.train.rothko_config}
+  processor: ${data.train.processor}
+  text_embedding_cache_dir: ${data.train.text_embedding_cache_dir}
+  context_len: ${data.train.context_len}

@@ -1,0 +1,55 @@
+# @package _global_
+
+defaults:
+  - override /data: libero_plus_rothko_2cam224
+  - override /model: fastwam_video_only_libero_rothko
+  - _self_
+
+# Plus-only domain adaptation from the completed clean-LIBERO Wan2.2 policy.
+# This is weight-only initialization; all stateful training components start
+# fresh for the LIBERO-Plus epoch.
+output_dir: ./runs/libero_plus_all4_rothko_centerfrac05_2cam224_full_wan22_5b_1e-5/${now:%Y-%m-%d}_${now:%H-%M-%S}
+resume: ./runs/libero_all4_rothko_2cam224_full_1e-4/2026-08-04_15-32-37/checkpoints/weights/step_021700.pt
+
+# Four-GPU effective global batch: 8 x 4 x 4 = 128 samples/update.
+batch_size: 8
+num_workers: 8
+gradient_accumulation_steps: 4
+
+num_epochs: 1
+max_steps: null
+learning_rate: 1.0e-5
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+weight_decay: 1.0e-2
+max_grad_norm: 1.0
+mixed_precision: bf16
+
+log_every: 10
+# At the expected 17,029 optimizer steps, save full state near 0.5 epoch;
+# the trainer always saves another full state and weights at the final step.
+save_every: 8515
+eval_every: 1703
+eval_num_inference_steps: 20
+eval_sample_index: 0
+eval_num_samples: 4
+eval_random_seed: 42
+eval_sample_manifest: ./data/libero_plus/libero_plus_fixed_val_windows_val02_seed42_n40.json
+
+finetune:
+  method: full
+  train_proprio_encoder: false
+
+# Training uses the original frozen Wan2.2 VAE; the center=0.5 decoder
+# safetensors remains evaluation-only.
+model:
+  vae_safetensors_path: null
+  allow_vae_mismatch: false
+
+wandb:
+  enabled: true
+  workspace: null
+  project: fast-wam
+  name: libero_plus_all4_rothko_centerfrac05_2cam224_full_wan22_5b_1e-5
+  group: libero_plus_all4_rothko_centerfrac05_full
+  mode: online

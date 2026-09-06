@@ -1,0 +1,58 @@
+# @package _global_
+
+defaults:
+  - override /data: libero_plus_rothko_2cam224
+  - override /model: fastwam_video_only_libero_rothko_wan21_1_3b
+  - _self_
+
+# Plus-only domain adaptation from the completed clean-LIBERO Wan2.1 policy.
+# `resume` points to a weights file, so optimizer/scheduler/sampler state starts
+# fresh on the source-group-disjoint LIBERO-Plus split.
+output_dir: ./runs/libero_plus_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-5/${now:%Y-%m-%d}_${now:%H-%M-%S}
+resume: ./runs/libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4/2026-08-28_17-06-22/checkpoints/weights/step_021700.pt
+
+# Four-GPU effective global batch: 4 x 4 x 8 = 128 samples/update.
+batch_size: 4
+num_workers: 8
+gradient_accumulation_steps: 8
+
+num_epochs: 1
+max_steps: null
+learning_rate: 1.0e-5
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+weight_decay: 1.0e-2
+max_grad_norm: 1.0
+mixed_precision: bf16
+
+log_every: 10
+# At the expected 17,029 optimizer steps, save full state near 0.5 epoch;
+# the trainer always saves another full state and weights at the final step.
+save_every: 8515
+eval_every: 1703
+eval_num_inference_steps: 20
+eval_sample_index: 0
+eval_num_samples: 4
+eval_random_seed: 42
+eval_sample_manifest: ./data/libero_plus/libero_plus_fixed_val_windows_val02_seed42_n40.json
+
+finetune:
+  method: full
+  train_proprio_encoder: false
+
+# Training deliberately uses the native frozen Wan2.1 VAE. The separately
+# fine-tuned conv2+decoder checkpoint is deployment/evaluation-only.
+model:
+  vae_safetensors_path: null
+  allow_vae_mismatch: false
+  video_dit_config:
+    # Verified on 4 x 80G GPUs with batch_size=4: ~72.9 GiB/GPU and no OOM.
+    use_gradient_checkpointing: false
+
+wandb:
+  enabled: true
+  workspace: null
+  project: fast-wam
+  name: libero_plus_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-5
+  group: libero_plus_all4_rothko_centerfrac05_full
+  mode: online
