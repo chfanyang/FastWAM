@@ -10,6 +10,18 @@ from fastwam.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+
+FRAME_ROLE_RGB_CONDITION = "rgb_condition"
+FRAME_ROLE_RGB_FUTURE = "rgb_future"
+FRAME_ROLE_RAYMAP_CONDITION = "raymap_condition"
+FRAME_ROLE_RAYMAP_FUTURE = "raymap_future"
+INDEPENDENT_RGB_AUX_RAY_ROLES = {
+    FRAME_ROLE_RGB_CONDITION,
+    FRAME_ROLE_RGB_FUTURE,
+    FRAME_ROLE_RAYMAP_CONDITION,
+    FRAME_ROLE_RAYMAP_FUTURE,
+}
+
     
 def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, ctx_mask: Optional[torch.Tensor] = None, compatibility_mode=True):
     if compatibility_mode:
@@ -476,6 +488,7 @@ class WanVideoDiT(torch.nn.Module):
         video_tokens_per_frame: int,
         device: torch.device,
         condition_frame_indices: Optional[Sequence[int]] = None,
+        frame_roles: Optional[Sequence[str]] = None,
     ) -> torch.Tensor:
         if video_seq_len <= 0:
             raise ValueError(f"`video_seq_len` must be positive, got {video_seq_len}")
@@ -599,6 +612,77 @@ class WanVideoDiT(torch.nn.Module):
                 video_tokens_per_frame, dim=0
             ).repeat_interleave(video_tokens_per_frame, dim=1)
 
+        if self.video_attention_mask_mode == "independent_rgb_aux_ray":
+            if video_seq_len % video_tokens_per_frame != 0:
+                raise ValueError(
+                    "`video_seq_len` must be divisible by `video_tokens_per_frame` "
+                    "in independent_rgb_aux_ray mode."
+                )
+            num_frames = video_seq_len // video_tokens_per_frame
+            if frame_roles is None or len(frame_roles) != num_frames:
+                raise ValueError(
+                    "independent_rgb_aux_ray mode requires one semantic role per "
+                    f"latent frame, got roles={frame_roles} num_frames={num_frames}."
+                )
+            roles = tuple(str(role) for role in frame_roles)
+            unknown = sorted(set(roles) - INDEPENDENT_RGB_AUX_RAY_ROLES)
+            if unknown:
+                raise ValueError(
+                    f"Unsupported independent RGB/Ray frame roles: {unknown}."
+                )
+            if roles.count(FRAME_ROLE_RGB_CONDITION) != 1:
+                raise ValueError(
+                    "independent_rgb_aux_ray mode requires exactly one RGB condition."
+                )
+            if roles.count(FRAME_ROLE_RAYMAP_CONDITION) != 1:
+                raise ValueError(
+                    "independent_rgb_aux_ray mode requires exactly one Raymap condition."
+                )
+            role_condition_indices = {
+                roles.index(FRAME_ROLE_RGB_CONDITION),
+                roles.index(FRAME_ROLE_RAYMAP_CONDITION),
+            }
+            supplied_condition_indices = {
+                int(index) for index in (condition_frame_indices or ())
+            }
+            if supplied_condition_indices != role_condition_indices:
+                raise ValueError(
+                    "Condition latent indices must match the RGB/Raymap condition "
+                    "roles: "
+                    f"indices={sorted(supplied_condition_indices)} "
+                    f"roles={sorted(role_condition_indices)}."
+                )
+
+            # RGB is a training-only auxiliary branch and never reads Raymap.
+            # Raymap reads the current RGB condition, but never future RGB.
+            allowed_keys = {
+                FRAME_ROLE_RGB_CONDITION: {FRAME_ROLE_RGB_CONDITION},
+                FRAME_ROLE_RGB_FUTURE: {
+                    FRAME_ROLE_RGB_CONDITION,
+                    FRAME_ROLE_RGB_FUTURE,
+                },
+                FRAME_ROLE_RAYMAP_CONDITION: {
+                    FRAME_ROLE_RGB_CONDITION,
+                    FRAME_ROLE_RAYMAP_CONDITION,
+                },
+                FRAME_ROLE_RAYMAP_FUTURE: {
+                    FRAME_ROLE_RGB_CONDITION,
+                    FRAME_ROLE_RAYMAP_CONDITION,
+                    FRAME_ROLE_RAYMAP_FUTURE,
+                },
+            }
+            frame_mask = torch.zeros(
+                (num_frames, num_frames), dtype=torch.bool, device=device
+            )
+            for query_index, query_role in enumerate(roles):
+                for key_index, key_role in enumerate(roles):
+                    frame_mask[query_index, key_index] = (
+                        key_role in allowed_keys[query_role]
+                    )
+            return frame_mask.repeat_interleave(
+                video_tokens_per_frame, dim=0
+            ).repeat_interleave(video_tokens_per_frame, dim=1)
+
         raise ValueError(f"Unsupported video attention mask mode: {self.video_attention_mask_mode}")
 
     def pre_dit(
@@ -611,6 +695,8 @@ class WanVideoDiT(torch.nn.Module):
         fuse_vae_embedding_in_latents: bool = False,
         control_camera_latents_input: Optional[torch.Tensor] = None,
         condition_latent_indices: Optional[Sequence[int]] = None,
+        latent_frame_roles: Optional[Sequence[str]] = None,
+        temporal_position_indices: Optional[Sequence[int]] = None,
     ) -> Dict[str, Any]:
         x, timestep, context_mask = self._validate_forward_inputs(
             x=x,
@@ -707,11 +793,46 @@ class WanVideoDiT(torch.nn.Module):
 
         x_tokens = rearrange(x, "b c f h w -> b (f h w) c").contiguous()
 
+        if temporal_position_indices is None:
+            # Preserve the legacy path exactly for every existing config and
+            # checkpoint. Sparse lookup is only used by the opt-in pruned
+            # Raymap inference mode below.
+            temporal_indices = tuple(range(f))
+            temporal_freqs = self.freqs[0][:f]
+        else:
+            temporal_indices = torch.as_tensor(
+                list(temporal_position_indices), dtype=torch.long
+            )
+            if temporal_indices.numel() != f:
+                raise ValueError(
+                    "`temporal_position_indices` must contain one entry per "
+                    f"latent frame, got {temporal_indices.numel()} and f={f}."
+                )
+            if temporal_indices.min().item() < 0:
+                raise ValueError("Temporal RoPE position indices must be non-negative.")
+            if temporal_indices.max().item() >= self.freqs[0].shape[0]:
+                raise ValueError(
+                    "Temporal RoPE position exceeds the precomputed table: "
+                    f"max={temporal_indices.max().item()} "
+                    f"table={self.freqs[0].shape[0]}."
+                )
+            temporal_freqs = self.freqs[0].index_select(
+                0, temporal_indices.to(device=self.freqs[0].device)
+            )
         freqs = torch.cat([
-            self.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            temporal_freqs.view(f, 1, 1, -1).expand(f, h, w, -1),
             self.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
             self.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
         ], dim=-1).reshape(f * h * w, 1, -1).to(x_tokens.device)
+
+        resolved_frame_roles = None
+        if latent_frame_roles is not None:
+            resolved_frame_roles = tuple(str(role) for role in latent_frame_roles)
+            if len(resolved_frame_roles) != f:
+                raise ValueError(
+                    "`latent_frame_roles` must contain one entry per latent frame, "
+                    f"got {len(resolved_frame_roles)} and f={f}."
+                )
 
         return {
             "tokens": x_tokens,
@@ -725,6 +846,15 @@ class WanVideoDiT(torch.nn.Module):
                 "tokens_per_frame": tokens_per_frame,
                 "batch_size": batch_size,
                 "condition_latent_indices": condition_indices,
+                "latent_frame_roles": resolved_frame_roles,
+                "temporal_position_indices": tuple(
+                    int(index)
+                    for index in (
+                        temporal_indices.tolist()
+                        if isinstance(temporal_indices, torch.Tensor)
+                        else temporal_indices
+                    )
+                ),
             },
         }
 
@@ -743,6 +873,8 @@ class WanVideoDiT(torch.nn.Module):
         action: Optional[torch.Tensor] = None,
         fuse_vae_embedding_in_latents: bool = False,
         condition_latent_indices: Optional[Sequence[int]] = None,
+        latent_frame_roles: Optional[Sequence[str]] = None,
+        temporal_position_indices: Optional[Sequence[int]] = None,
     ):
         pre_state = self.pre_dit(
             x=x,
@@ -752,6 +884,8 @@ class WanVideoDiT(torch.nn.Module):
             action=action,
             fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
             condition_latent_indices=condition_latent_indices,
+            latent_frame_roles=latent_frame_roles,
+            temporal_position_indices=temporal_position_indices,
         )
         x_tokens = pre_state["tokens"]
         context_emb = pre_state["context"]
@@ -763,6 +897,7 @@ class WanVideoDiT(torch.nn.Module):
             video_tokens_per_frame=int(pre_state["meta"]["tokens_per_frame"]),
             device=x_tokens.device,
             condition_frame_indices=pre_state["meta"]["condition_latent_indices"],
+            frame_roles=pre_state["meta"]["latent_frame_roles"],
         ) if self.video_attention_mask_mode != "bidirectional" else None # special rule for faster speed
 
         for block in self.blocks:

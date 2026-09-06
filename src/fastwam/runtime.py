@@ -176,8 +176,13 @@ def create_fastwam_video_only_raymap(
     raymap_representation: str = "rothko",
     rothko_norm_stats: str | None = None,
     rothko_config=None,
+    rothko_decode_mode: str = "legacy",
+    rothko_decode_anchor_alpha: float = 0.0,
+    rothko_decode_block_grid: int = 4,
     latent_layout: str = "rgb_then_raymap",
     channel_io_init: str = "duplicate_sqrt2_input_duplicate_output",
+    future_rgb_mode: str = "joint",
+    inference_predict_future_rgb: bool = False,
     allow_vae_mismatch: bool = False,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
@@ -230,8 +235,13 @@ def create_fastwam_video_only_raymap(
         raymap_representation=str(raymap_representation),
         rothko_norm_stats=rothko_norm_stats,
         rothko_config=rothko_config,
+        rothko_decode_mode=str(rothko_decode_mode),
+        rothko_decode_anchor_alpha=float(rothko_decode_anchor_alpha),
+        rothko_decode_block_grid=int(rothko_decode_block_grid),
         latent_layout=str(latent_layout),
         channel_io_init=str(channel_io_init),
+        future_rgb_mode=str(future_rgb_mode),
+        inference_predict_future_rgb=bool(inference_predict_future_rgb),
         allow_vae_mismatch=bool(allow_vae_mismatch),
     )
 
@@ -411,7 +421,19 @@ def create_fastwam_idm(
 def build_datasets(data_cfg: DictConfig):
     train_ds = instantiate(data_cfg.train)
     if data_cfg.get("val") is None:
-        val_ds = train_ds
+        if bool(data_cfg.train.get("latent_cache_only", False)):
+            val_cfg = OmegaConf.create(
+                OmegaConf.to_container(data_cfg.train, resolve=True)
+            )
+            val_cfg.latent_cache_only = False
+            val_cfg.latent_cache_dir = None
+            logger.info(
+                "Building a full-pixel validation dataset alongside the "
+                "latent-cache-only training dataset."
+            )
+            val_ds = instantiate(val_cfg)
+        else:
+            val_ds = train_ds
     else:
         train_stats_path = data_cfg.train.get("pretrained_norm_stats")
         default_stats_path = os.path.join(misc.get_work_dir(), "dataset_stats.json")
@@ -428,6 +450,7 @@ def _validate_visual_action_data_contract(model, *datasets) -> None:
         return
     model_metadata = model_codec.metadata()
     model_stats = getattr(model_codec, "norm_stats", None)
+    validated_latent_caches = set()
     for split_name, dataset in zip(("train", "val"), datasets):
         dataset_codec = getattr(dataset, "raymap_codec", None)
         if dataset_codec is None:
@@ -467,6 +490,12 @@ def _validate_visual_action_data_contract(model, *datasets) -> None:
                 f"model.action_horizon={model.action_horizon}; expected "
                 f"num_frames={model.action_horizon + 1}."
             )
+        latent_cache_metadata = getattr(dataset, "latent_cache_metadata", None)
+        if latent_cache_metadata is not None:
+            cache_key = id(latent_cache_metadata)
+            if cache_key not in validated_latent_caches:
+                model.validate_latent_cache_metadata(latent_cache_metadata)
+                validated_latent_caches.add(cache_key)
 
 
 def _resolve_train_device() -> str:

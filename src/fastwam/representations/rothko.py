@@ -22,6 +22,48 @@ from typing import Any
 import torch
 
 
+ROTHKO_DECODE_MODE_LEGACY = "legacy"
+ROTHKO_DECODE_MODE_ROBUST_JOINT = "robust_joint"
+ROTHKO_DECODE_MODE_ROBUST_TILEWISE = "robust_tilewise"
+ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS = "robust_block_consensus"
+SUPPORTED_ROTHKO_DECODE_MODES = {
+    ROTHKO_DECODE_MODE_LEGACY,
+    ROTHKO_DECODE_MODE_ROBUST_JOINT,
+    ROTHKO_DECODE_MODE_ROBUST_TILEWISE,
+    ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS,
+}
+
+
+def _validate_decode_mode(decode_mode: str) -> str:
+    decode_mode = str(decode_mode)
+    if decode_mode not in SUPPORTED_ROTHKO_DECODE_MODES:
+        raise ValueError(
+            f"Unsupported Rothko decode_mode={decode_mode!r}; expected one of "
+            f"{sorted(SUPPORTED_ROTHKO_DECODE_MODES)}."
+        )
+    return decode_mode
+
+
+def _validate_decode_anchor_alpha(alpha: float) -> float:
+    alpha = float(alpha)
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(
+            "Rothko decode_anchor_alpha must be in [0,1], got "
+            f"{alpha}."
+        )
+    return alpha
+
+
+def _validate_decode_block_grid(block_grid: int) -> int:
+    block_grid = int(block_grid)
+    if block_grid < 2:
+        raise ValueError(
+            "Rothko decode_block_grid must be at least 2, got "
+            f"{block_grid}."
+        )
+    return block_grid
+
+
 @dataclass(frozen=True)
 class RothkoCodecConfig:
     image_height: int = 384
@@ -214,14 +256,447 @@ def _border_mask(height: int, width: int, margin: int, device: torch.device) -> 
     return mask
 
 
+def _huber_location(
+    values: torch.Tensor,
+    *,
+    sample_dim: int,
+    num_iterations: int = 2,
+    tuning: float = 1.5,
+) -> torch.Tensor:
+    """Return a component-wise robust location without rejecting any sample."""
+    estimate = _midpoint_median(values, dim=sample_dim)
+    eps = torch.finfo(values.dtype).eps
+    for _ in range(num_iterations):
+        residual = values - estimate.unsqueeze(sample_dim)
+        mad = _midpoint_median(residual.abs(), dim=sample_dim)
+        delta = (float(tuning) * 1.4826 * mad).clamp_min(1e-6)
+        weights = torch.clamp(
+            delta.unsqueeze(sample_dim) / residual.abs().clamp_min(eps),
+            max=1.0,
+        )
+        estimate = (weights * values).sum(dim=sample_dim) / weights.sum(
+            dim=sample_dim
+        ).clamp_min(eps)
+    return estimate
+
+
+def _midpoint_median(values: torch.Tensor, *, dim: int) -> torch.Tensor:
+    """Median whose even-sample value is the midpoint of both central values."""
+    lower = values.median(dim=dim).values
+    if values.shape[dim] % 2:
+        return lower
+    upper = -(-values).median(dim=dim).values
+    return (lower + upper) * 0.5
+
+
+def _proper_rotation_from_correlation(correlation: torch.Tensor) -> torch.Tensor:
+    u, _, vh = torch.linalg.svd(correlation)
+    determinant = torch.linalg.det(u @ vh)
+    correction = torch.eye(
+        3, dtype=correlation.dtype, device=correlation.device
+    ).expand(correlation.shape[:-2] + (3, 3)).clone()
+    correction[..., 2, 2] = torch.where(determinant >= 0, 1.0, -1.0)
+    return u @ correction @ vh
+
+
+def _robust_relative_rotation(
+    direction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    num_iterations: int = 2,
+    tuning: float = 1.5,
+) -> torch.Tensor:
+    """Joint iteratively reweighted Kabsch fit over all duplicate-tile rays."""
+    eps = torch.finfo(direction.dtype).eps
+    direction = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+    reference = reference / reference.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+    weights = torch.ones(
+        direction.shape[:-1], dtype=direction.dtype, device=direction.device
+    )
+    rotation = None
+    for iteration in range(num_iterations + 1):
+        correlation = torch.einsum(
+            "btni,btnj,btn->btij", direction, reference, weights
+        )
+        correlation = correlation / weights.sum(dim=-1, keepdim=True).clamp_min(
+            eps
+        ).unsqueeze(-1)
+        rotation = _proper_rotation_from_correlation(correlation)
+        if iteration == num_iterations:
+            break
+        fitted = torch.einsum("btij,btnj->btni", rotation, reference)
+        residual = (direction - fitted).norm(dim=-1)
+        median = _midpoint_median(residual, dim=-1).unsqueeze(-1)
+        mad = _midpoint_median((residual - median).abs(), dim=-1).unsqueeze(-1)
+        delta = (median + float(tuning) * 1.4826 * mad).clamp_min(1e-6)
+        weights = torch.clamp(delta / residual.clamp_min(eps), max=1.0)
+    assert rotation is not None
+    return rotation
+
+
+def _blend_direction_reference(
+    predicted: torch.Tensor,
+    canonical: torch.Tensor,
+    *,
+    anchor_alpha: float,
+) -> torch.Tensor:
+    """Blend a predicted frame-zero ray field with the analytic template."""
+    predicted = predicted / predicted.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+    canonical = canonical / canonical.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+    alpha = float(anchor_alpha)
+    if alpha == 0.0:
+        return predicted
+    reference = predicted * (1.0 - alpha) + canonical * alpha
+    return reference / reference.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+
+
+def _robust_rotation_average(
+    rotations: torch.Tensor,
+    *,
+    sample_dim: int,
+    num_iterations: int = 2,
+    tuning: float = 1.5,
+) -> torch.Tensor:
+    """Return an iteratively reweighted chordal mean on SO(3)."""
+    rotations = rotations.movedim(sample_dim, -3)
+    eps = torch.finfo(rotations.dtype).eps
+    weights = torch.ones(
+        rotations.shape[:-2], dtype=rotations.dtype, device=rotations.device
+    )
+    mean = None
+    for iteration in range(num_iterations + 1):
+        correlation = (rotations * weights[..., None, None]).sum(dim=-3)
+        correlation = correlation / weights.sum(dim=-1, keepdim=True).clamp_min(
+            eps
+        ).unsqueeze(-1)
+        mean = _proper_rotation_from_correlation(correlation)
+        if iteration == num_iterations:
+            break
+        relative = rotations @ mean.unsqueeze(-3).transpose(-1, -2)
+        cosine = (
+            (relative.diagonal(dim1=-2, dim2=-1).sum(dim=-1) - 1.0) * 0.5
+        ).clamp(-1.0, 1.0)
+        residual = torch.acos(cosine)
+        median = _midpoint_median(residual, dim=-1).unsqueeze(-1)
+        mad = _midpoint_median((residual - median).abs(), dim=-1).unsqueeze(-1)
+        delta = (median + float(tuning) * 1.4826 * mad).clamp_min(1e-6)
+        weights = torch.clamp(delta / residual.clamp_min(eps), max=1.0)
+    assert mean is not None
+    return mean
+
+
+def _absolute_pose_from_relative(
+    relative_position: torch.Tensor,
+    relative_rotation: torch.Tensor,
+    base_pose7: torch.Tensor,
+    *,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    relative_position = relative_position.clone()
+    relative_rotation = relative_rotation.clone()
+    relative_position[:, 0] = 0
+    relative_rotation[:, 0] = torch.eye(
+        3, dtype=relative_rotation.dtype, device=relative_rotation.device
+    )
+    base_position = base_pose7[:, None, :3].to(relative_position.dtype)
+    base_rotation = quaternion_wxyz_to_matrix(
+        base_pose7[:, 3:7].to(relative_rotation.dtype)
+    )[:, None]
+    absolute_position = base_position + torch.einsum(
+        "btij,btj->bti", base_rotation, relative_position
+    )
+    absolute_rotation = base_rotation @ relative_rotation
+    quaternion = matrix_to_quaternion_wxyz(absolute_rotation)
+    return torch.cat((absolute_position, quaternion), dim=-1).to(output_dtype)
+
+
+def _decode_pose_tiles_robust_joint(
+    tiles: torch.Tensor,
+    base_pose7: torch.Tensor,
+    *,
+    center_frac: float,
+    boundary_margin: int,
+    outer_margin: int,
+    center_scale: float,
+    canonical_directions: torch.Tensor | None = None,
+    anchor_alpha: float = 0.0,
+    anchor_tiles: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Decode one pose from ``[B,T,K,3,H,W]`` duplicate Rothko tiles."""
+    if tiles.ndim != 6 or tiles.shape[3] != 3:
+        raise ValueError(
+            "Expected robust Rothko tiles [B,T,K,3,H,W], got "
+            f"{tuple(tiles.shape)}."
+        )
+    batch, time, copies, _, height, width = tiles.shape
+    _, origin_mask, direction_mask = _center_and_read_masks(
+        height,
+        width,
+        center_frac=center_frac,
+        boundary_margin=boundary_margin,
+        outer_margin=outer_margin,
+        device=tiles.device,
+    )
+    values = tiles.permute(0, 1, 2, 4, 5, 3).to(torch.float64)
+    values = values.reshape(batch, time, copies, height * width, 3)
+
+    origin_values = values[:, :, :, origin_mask.reshape(-1), :]
+    origin_values = origin_values.reshape(batch, time, -1, 3)
+    origin_code = _huber_location(origin_values, sample_dim=2)
+    predicted_origin_reference = origin_code[:, :1].expand(-1, time, -1)
+    anchor_origin = torch.zeros_like(predicted_origin_reference)
+    anchor_direction = None
+    if anchor_tiles is not None:
+        if anchor_tiles.ndim != 6 or anchor_tiles.shape[2:] != tiles.shape[2:]:
+            raise ValueError(
+                "Rothko anchor tile shape mismatch: "
+                f"anchor={tuple(anchor_tiles.shape)} tiles={tuple(tiles.shape)}."
+            )
+        if anchor_tiles.shape[0] not in (1, batch) or anchor_tiles.shape[1] != time:
+            raise ValueError(
+                "Rothko anchor tiles must have batch 1 or the decode batch and "
+                f"matching time, got {tuple(anchor_tiles.shape)}."
+            )
+        anchor_values = anchor_tiles.permute(0, 1, 2, 4, 5, 3).to(
+            device=tiles.device, dtype=torch.float64
+        )
+        anchor_values = anchor_values.reshape(
+            anchor_values.shape[0], time, copies, height * width, 3
+        )
+        anchor_origin_values = anchor_values[
+            :, :, :, origin_mask.reshape(-1), :
+        ].reshape(anchor_values.shape[0], time, -1, 3)
+        anchor_origin = _huber_location(anchor_origin_values, sample_dim=2)
+        anchor_origin = anchor_origin.expand(batch, -1, -1)
+        anchor_direction = anchor_values[
+            :, :, :, direction_mask.reshape(-1), :
+        ].reshape(anchor_values.shape[0], time, -1, 3)
+        anchor_direction = anchor_direction.expand(batch, -1, -1, -1)
+    origin_reference = (
+        predicted_origin_reference * (1.0 - float(anchor_alpha))
+        + anchor_origin * float(anchor_alpha)
+    )
+    relative_position = (origin_code - origin_reference) / float(center_scale)
+
+    direction = values[:, :, :, direction_mask.reshape(-1), :]
+    direction = direction.reshape(batch, time, -1, 3)
+    predicted_reference = direction[:, :1].expand(-1, time, -1, -1)
+    if float(anchor_alpha) != 0.0:
+        if anchor_direction is None and canonical_directions is None:
+            raise ValueError(
+                "canonical_directions or anchor_tiles are required when "
+                "anchor_alpha is nonzero."
+            )
+        if anchor_direction is None:
+            canonical = canonical_directions.to(
+                device=tiles.device, dtype=torch.float64
+            )[direction_mask]
+            canonical = canonical.reshape(1, 1, 1, -1, 3).expand(
+                batch, time, copies, -1, -1
+            )
+            anchor_direction = canonical.reshape(batch, time, -1, 3)
+        predicted_reference = _blend_direction_reference(
+            predicted_reference,
+            anchor_direction,
+            anchor_alpha=anchor_alpha,
+        )
+    relative_rotation = _robust_relative_rotation(direction, predicted_reference)
+    return _absolute_pose_from_relative(
+        relative_position,
+        relative_rotation,
+        base_pose7,
+        output_dtype=tiles.dtype,
+    )
+
+
+def _decode_pose_tiles_robust_tilewise(
+    tiles: torch.Tensor,
+    base_pose7: torch.Tensor,
+    *,
+    center_frac: float,
+    boundary_margin: int,
+    outer_margin: int,
+    center_scale: float,
+    canonical_directions: torch.Tensor | None = None,
+    anchor_alpha: float = 0.0,
+    anchor_tiles: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Decode each duplicate tile independently, then fuse poses on SE(3)."""
+    if tiles.ndim != 6 or tiles.shape[3] != 3:
+        raise ValueError(
+            "Expected robust Rothko tiles [B,T,K,3,H,W], got "
+            f"{tuple(tiles.shape)}."
+        )
+    candidates = []
+    for index in range(tiles.shape[2]):
+        candidates.append(
+            _decode_pose_tiles_robust_joint(
+                tiles[:, :, index : index + 1],
+                base_pose7,
+                center_frac=center_frac,
+                boundary_margin=boundary_margin,
+                outer_margin=outer_margin,
+                center_scale=center_scale,
+                canonical_directions=canonical_directions,
+                anchor_alpha=anchor_alpha,
+                anchor_tiles=(
+                    None
+                    if anchor_tiles is None
+                    else anchor_tiles[:, :, index : index + 1]
+                ),
+            )
+        )
+    poses = torch.stack(candidates, dim=2).to(torch.float64)
+    position = _huber_location(poses[..., :3], sample_dim=2)
+    rotations = quaternion_wxyz_to_matrix(poses[..., 3:7])
+    rotation = _robust_rotation_average(rotations, sample_dim=2)
+    quaternion = matrix_to_quaternion_wxyz(rotation)
+    return torch.cat((position, quaternion), dim=-1).to(tiles.dtype)
+
+
+def _decode_pose_tiles_robust_block_consensus(
+    tiles: torch.Tensor,
+    base_pose7: torch.Tensor,
+    *,
+    center_frac: float,
+    boundary_margin: int,
+    outer_margin: int,
+    center_scale: float,
+    canonical_directions: torch.Tensor,
+    anchor_alpha: float = 0.0,
+    block_grid: int = 4,
+    anchor_tiles: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Fuse block-level translation and rotation estimates across duplicates."""
+    if tiles.ndim != 6 or tiles.shape[3] != 3:
+        raise ValueError(
+            "Expected robust Rothko tiles [B,T,K,3,H,W], got "
+            f"{tuple(tiles.shape)}."
+        )
+    batch, time, copies, _, height, width = tiles.shape
+    _, origin_mask, direction_mask = _center_and_read_masks(
+        height,
+        width,
+        center_frac=center_frac,
+        boundary_margin=boundary_margin,
+        outer_margin=outer_margin,
+        device=tiles.device,
+    )
+    values = tiles.permute(0, 1, 2, 4, 5, 3).to(torch.float64)
+    canonical = canonical_directions.to(
+        device=tiles.device, dtype=torch.float64
+    )
+    if canonical.shape != (height, width, 3):
+        raise ValueError(
+            "Canonical Rothko direction shape mismatch: "
+            f"{tuple(canonical.shape)} vs {(height, width, 3)}."
+        )
+    anchor_values = None
+    if anchor_tiles is not None:
+        if anchor_tiles.ndim != 6 or anchor_tiles.shape[2:] != tiles.shape[2:]:
+            raise ValueError(
+                "Rothko anchor tile shape mismatch: "
+                f"anchor={tuple(anchor_tiles.shape)} tiles={tuple(tiles.shape)}."
+            )
+        if anchor_tiles.shape[0] not in (1, batch) or anchor_tiles.shape[1] != time:
+            raise ValueError(
+                "Rothko anchor tiles must have batch 1 or the decode batch and "
+                f"matching time, got {tuple(anchor_tiles.shape)}."
+            )
+        anchor_values = anchor_tiles.permute(0, 1, 2, 4, 5, 3).to(
+            device=tiles.device, dtype=torch.float64
+        )
+        anchor_values = anchor_values.expand(batch, -1, -1, -1, -1, -1)
+
+    position_candidates: list[torch.Tensor] = []
+    rotation_candidates: list[torch.Tensor] = []
+    y_edges = torch.linspace(0, height, block_grid + 1).round().to(torch.int64)
+    x_edges = torch.linspace(0, width, block_grid + 1).round().to(torch.int64)
+    for copy_index in range(copies):
+        tile = values[:, :, copy_index]
+        for y_index in range(block_grid):
+            y0, y1 = int(y_edges[y_index]), int(y_edges[y_index + 1])
+            for x_index in range(block_grid):
+                x0, x1 = int(x_edges[x_index]), int(x_edges[x_index + 1])
+                origin_block = origin_mask[y0:y1, x0:x1]
+                if int(origin_block.sum()) >= 4:
+                    samples = tile[:, :, y0:y1, x0:x1][..., origin_block, :]
+                    location = _huber_location(samples, sample_dim=2)
+                    predicted_reference = location[:, :1].expand(-1, time, -1)
+                    if anchor_values is None:
+                        anchor_reference = torch.zeros_like(predicted_reference)
+                    else:
+                        anchor_samples = anchor_values[
+                            :, :, copy_index, y0:y1, x0:x1
+                        ][..., origin_block, :]
+                        anchor_reference = _huber_location(
+                            anchor_samples, sample_dim=2
+                        )
+                    reference = (
+                        predicted_reference * (1.0 - float(anchor_alpha))
+                        + anchor_reference * float(anchor_alpha)
+                    )
+                    position_candidates.append(
+                        (location - reference) / float(center_scale)
+                    )
+
+                direction_block = direction_mask[y0:y1, x0:x1]
+                if int(direction_block.sum()) >= 8:
+                    samples = tile[:, :, y0:y1, x0:x1][..., direction_block, :]
+                    predicted_reference = samples[:, :1].expand(-1, time, -1, -1)
+                    if anchor_values is None:
+                        anchor_reference = canonical[y0:y1, x0:x1][direction_block]
+                        anchor_reference = anchor_reference.reshape(
+                            1, 1, -1, 3
+                        ).expand(batch, time, -1, -1)
+                    else:
+                        anchor_reference = anchor_values[
+                            :, :, copy_index, y0:y1, x0:x1
+                        ][..., direction_block, :]
+                    reference = _blend_direction_reference(
+                        predicted_reference,
+                        anchor_reference,
+                        anchor_alpha=anchor_alpha,
+                    )
+                    rotation_candidates.append(
+                        _robust_relative_rotation(samples, reference)
+                    )
+
+    if not position_candidates or not rotation_candidates:
+        raise ValueError(
+            "Rothko block consensus produced no valid position or rotation blocks."
+        )
+    relative_position = _huber_location(
+        torch.stack(position_candidates, dim=2), sample_dim=2
+    )
+    relative_rotation = _robust_rotation_average(
+        torch.stack(rotation_candidates, dim=2), sample_dim=2
+    )
+    return _absolute_pose_from_relative(
+        relative_position,
+        relative_rotation,
+        base_pose7,
+        output_dtype=tiles.dtype,
+    )
+
+
 class RothkoCodec:
     def __init__(
         self,
         config: RothkoCodecConfig | None = None,
         norm_stats: RothkoNormStats | str | Path | None = None,
+        decode_mode: str = ROTHKO_DECODE_MODE_LEGACY,
+        decode_anchor_alpha: float = 0.0,
+        decode_block_grid: int = 4,
     ):
         self.config = config or RothkoCodecConfig()
         self.config.validate()
+        self.decode_mode = _validate_decode_mode(decode_mode)
+        self.decode_anchor_alpha = _validate_decode_anchor_alpha(
+            decode_anchor_alpha
+        )
+        self.decode_block_grid = _validate_decode_block_grid(decode_block_grid)
+        self._decode_anchor_raw: torch.Tensor | None = None
         if isinstance(norm_stats, (str, Path)):
             norm_stats = RothkoNormStats.load(norm_stats)
         self.norm_stats = norm_stats
@@ -233,6 +708,24 @@ class RothkoCodec:
                     f"stats={tuple(self.norm_stats.lo.shape)} codec={expected_shape}."
                 )
             self._validate_stats_metadata(self.norm_stats.metadata)
+
+    def set_decode_anchor_video(self, normalized_video: torch.Tensor) -> None:
+        """Cache a VAE-reconstructed zero-motion template for pose anchoring."""
+        if normalized_video.ndim != 5 or normalized_video.shape[0] != 1:
+            raise ValueError(
+                "Rothko anchor video must be [1,3,T,H,W], got "
+                f"{tuple(normalized_video.shape)}."
+            )
+        if normalized_video.shape[1] != 3 or normalized_video.shape[-2:] != (
+            self.config.image_height,
+            self.config.image_width,
+        ):
+            raise ValueError(
+                "Rothko anchor video channel/spatial shape mismatch: "
+                f"{tuple(normalized_video.shape)}."
+            )
+        normalized = normalized_video.permute(0, 2, 1, 3, 4).contiguous()
+        self._decode_anchor_raw = self.denormalize(normalized).detach()
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -526,17 +1019,15 @@ class RothkoCodec:
         gripper = self.read_gripper(normalized)
         raw = self.denormalize(normalized)
         top = raw[..., : self.config.arm_height, :]
-        if self.config.duplicate_vertical:
+        if self.decode_mode == ROTHKO_DECODE_MODE_LEGACY and self.config.duplicate_vertical:
             bottom = raw[
                 ...,
                 self.config.arm_height : 2 * self.config.arm_height,
                 :,
             ]
             combined = (top + bottom) * 0.5
-        else:
+        elif self.decode_mode == ROTHKO_DECODE_MODE_LEGACY:
             combined = top
-        left = combined[..., : self.config.arm_width]
-        right = combined[..., self.config.arm_width :]
 
         if current_pose14.ndim == 1:
             current_pose14 = current_pose14.unsqueeze(0)
@@ -544,13 +1035,96 @@ class RothkoCodec:
             raise ValueError(
                 f"Expected current_pose14 {(video.shape[0], 14)}, got {tuple(current_pose14.shape)}"
             )
-        pose = torch.cat(
-            (
-                self._decode_arm_raw(left, current_pose14[:, :7]),
-                self._decode_arm_raw(right, current_pose14[:, 7:14]),
-            ),
-            dim=-1,
-        )
+        if self.decode_mode == ROTHKO_DECODE_MODE_LEGACY:
+            left = combined[..., : self.config.arm_width]
+            right = combined[..., self.config.arm_width :]
+            pose = torch.cat(
+                (
+                    self._decode_arm_raw(left, current_pose14[:, :7]),
+                    self._decode_arm_raw(right, current_pose14[:, 7:14]),
+                ),
+                dim=-1,
+            )
+        else:
+            halves = [top]
+            if self.config.duplicate_vertical:
+                halves.append(
+                    raw[
+                        ...,
+                        self.config.arm_height : 2 * self.config.arm_height,
+                        :,
+                    ]
+                )
+            left_tiles = torch.stack(
+                [half[..., : self.config.arm_width] for half in halves], dim=2
+            )
+            right_tiles = torch.stack(
+                [half[..., self.config.arm_width :] for half in halves], dim=2
+            )
+            cfg = self.config
+            decoder = {
+                ROTHKO_DECODE_MODE_ROBUST_JOINT: _decode_pose_tiles_robust_joint,
+                ROTHKO_DECODE_MODE_ROBUST_TILEWISE: _decode_pose_tiles_robust_tilewise,
+                ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS: (
+                    _decode_pose_tiles_robust_block_consensus
+                ),
+            }[self.decode_mode]
+            decoder_kwargs: dict[str, Any] = {
+                "center_frac": cfg.center_frac,
+                "boundary_margin": cfg.boundary_margin,
+                "outer_margin": cfg.outer_margin,
+                "center_scale": cfg.center_scale,
+                "canonical_directions": self._canonical_directions(
+                    raw.device, torch.float64
+                ),
+                "anchor_alpha": self.decode_anchor_alpha,
+            }
+            if self.decode_mode == ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS:
+                decoder_kwargs["block_grid"] = self.decode_block_grid
+            left_kwargs = dict(decoder_kwargs)
+            right_kwargs = dict(decoder_kwargs)
+            if self._decode_anchor_raw is not None:
+                anchor_raw = self._decode_anchor_raw.to(
+                    device=raw.device, dtype=raw.dtype
+                )
+                anchor_halves = [anchor_raw[..., : self.config.arm_height, :]]
+                if self.config.duplicate_vertical:
+                    anchor_halves.append(
+                        anchor_raw[
+                            ...,
+                            self.config.arm_height : 2 * self.config.arm_height,
+                            :,
+                        ]
+                    )
+                left_kwargs["anchor_tiles"] = torch.stack(
+                    [
+                        half[..., : self.config.arm_width]
+                        for half in anchor_halves
+                    ],
+                    dim=2,
+                )
+                right_kwargs["anchor_tiles"] = torch.stack(
+                    [
+                        half[..., self.config.arm_width :]
+                        for half in anchor_halves
+                    ],
+                    dim=2,
+                )
+            pose = torch.cat(
+                (
+                    decoder(
+                        left_tiles,
+                        current_pose14[:, :7],
+                        **left_kwargs,
+                    ),
+                    decoder(
+                        right_tiles,
+                        current_pose14[:, 7:14],
+                        **right_kwargs,
+                    ),
+                ),
+                dim=-1,
+            )
         if squeeze:
             return pose.squeeze(0), gripper.squeeze(0)
         return pose, gripper

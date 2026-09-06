@@ -1,0 +1,13 @@
+defaults:
+  - fastwam_video_only_libero_rothko_wan21_1_3b
+  - _self_
+
+# Keep the legacy [RGB_0..N | RAY_0..N] training-time latent layout and both
+# losses, but make future RGB a strictly independent auxiliary branch. At
+# inference RGB_1..N is pruned and only [RGB_0 | RAY_0..N] is denoised.
+latent_layout: rgb_then_raymap
+future_rgb_mode: train_only_auxiliary
+
+video_dit_config:
+  video_attention_mask_mode: independent_rgb_aux_ray
+

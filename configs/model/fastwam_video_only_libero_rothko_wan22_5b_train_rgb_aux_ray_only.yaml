@@ -1,0 +1,12 @@
+defaults:
+  - fastwam_video_only_libero_rothko
+  - _self_
+
+# Train with the legacy [RGB_0..N | RAY_0..N] latent sequence and retain both
+# losses. Future RGB is an isolated auxiliary branch; inference removes
+# RGB_1..N and denoises only [RGB_0 | RAY_0..N].
+latent_layout: rgb_then_raymap
+future_rgb_mode: train_only_auxiliary
+
+video_dit_config:
+  video_attention_mask_mode: independent_rgb_aux_ray

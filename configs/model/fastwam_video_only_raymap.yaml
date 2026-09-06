@@ -11,6 +11,12 @@ skip_dit_load_from_pretrain: false
 action_horizon: 16
 raymap_representation: rothko
 rothko_norm_stats: ${data.train.rothko_norm_stats}
+# Inference-only decoder switch. Keep legacy for exact reproduction of all
+# existing checkpoints. Opt-in modes: robust_joint, robust_tilewise, and
+# robust_block_consensus. The anchor/block options are inference-only too.
+rothko_decode_mode: legacy
+rothko_decode_anchor_alpha: 0.0
+rothko_decode_block_grid: 4
 
 video_dit_config:
   has_image_input: false

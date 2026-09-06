@@ -1,0 +1,54 @@
+# @package _global_
+
+defaults:
+  - override /data: libero_rothko_2cam224
+  - override /model: fastwam_video_only_libero_rothko_wan22_5b_train_rgb_aux_ray_only
+  - _self_
+
+output_dir: ./runs/libero_goal_rothko_centerfrac05_2cam224_full_wan22_5b_train_rgb_aux_ray_only_1e-4/${now:%Y-%m-%d}_${now:%H-%M-%S}
+
+# Controlled comparison with the existing Wan2.2 5B LIBERO-Goal full tune.
+# Dataset, Rothko geometry/stats, optimizer, losses and effective batch are
+# unchanged; only RGB/Ray attention dependencies and Ray-only inference differ.
+data:
+  train:
+    dataset_dirs:
+      - ./data/libero_mujoco3.3.2/libero_goal_no_noops_lerobot
+    rothko_norm_stats: ./data/libero_mujoco3.3.2/libero_rothko_region_symmetric_q99p95_h16_224x448.pt
+    rothko_config:
+      center_frac: 0.5
+
+# Four-GPU effective global batch:
+#   4 samples/GPU x 4 GPUs x 4 accumulation steps = 64 samples/update.
+batch_size: 4
+num_workers: 8
+gradient_accumulation_steps: 4
+
+lr_scheduler_type: cosine
+learning_rate: 1.0e-4
+num_epochs: 10
+max_steps: null
+log_every: 10
+# With max_steps=8270 this produces exactly two persistent states:
+# one midpoint checkpoint at step 4140 and the final checkpoint at step 8270.
+save_every: 4140
+eval_every: 500
+eval_num_inference_steps: 20
+eval_sample_index: 0
+eval_num_samples: 4
+eval_random_seed: 42
+
+weight_decay: 1.0e-2
+resume: null
+
+finetune:
+  method: full
+  train_proprio_encoder: false
+
+wandb:
+  enabled: true
+  workspace: null
+  project: fast-wam
+  name: libero_goal_rothko_centerfrac05_2cam224_full_wan22_5b_train_rgb_aux_ray_only_1e-4
+  group: libero_goal_rothko_ray_only_wan22_5b
+  mode: online

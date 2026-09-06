@@ -7,10 +7,19 @@ proprio_dim: null
 redirect_common_files: true
 vae_safetensors_path: null
 allow_vae_mismatch: false
+# Runtime-only ablation. For train_only_auxiliary checkpoints, true restores
+# the full training-time [RGB_0..N | RAY_0..N] denoising graph at evaluation.
+inference_predict_future_rgb: false
 skip_dit_load_from_pretrain: false
 action_horizon: 16
 raymap_representation: libero_rothko
 rothko_norm_stats: ${data.train.rothko_norm_stats}
+# Inference-only decoder switch. Keep legacy for exact reproduction of all
+# existing checkpoints. Opt-in modes: robust_joint, robust_tilewise, and
+# robust_block_consensus. The anchor/block options are inference-only too.
+rothko_decode_mode: legacy
+rothko_decode_anchor_alpha: 0.0
+rothko_decode_block_grid: 4
 
 video_dit_config:
   has_image_input: false

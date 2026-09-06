@@ -41,6 +41,8 @@ class VisualActionRepresentationMetadataTest(unittest.TestCase):
         *,
         center_frac: float = 0.5,
         stats_offset: float = 0.0,
+        future_rgb_mode: str = "joint",
+        rothko_decode_mode: str = "legacy",
     ) -> FastWAMVideoOnlyRaymap:
         if representation == "rothko":
             stats = _stats(384, 320, {})
@@ -64,8 +66,11 @@ class VisualActionRepresentationMetadataTest(unittest.TestCase):
         if stats_offset:
             stats.lo = stats.lo + stats_offset
             stats.hi = stats.hi + stats_offset
+        video_expert = _DummyVideoExpert()
+        if future_rgb_mode == "train_only_auxiliary":
+            video_expert.video_attention_mask_mode = "independent_rgb_aux_ray"
         return FastWAMVideoOnlyRaymap(
-            video_expert=_DummyVideoExpert(),
+            video_expert=video_expert,
             vae=_DummyVae(),
             text_dim=16,
             device="cpu",
@@ -73,6 +78,8 @@ class VisualActionRepresentationMetadataTest(unittest.TestCase):
             raymap_representation=representation,
             rothko_norm_stats=stats,
             rothko_config=config,
+            rothko_decode_mode=rothko_decode_mode,
+            future_rgb_mode=future_rgb_mode,
         )
 
     def test_new_checkpoint_metadata_is_environment_specific(self) -> None:
@@ -123,6 +130,15 @@ class VisualActionRepresentationMetadataTest(unittest.TestCase):
                 checkpoint_config, checkpoint_path="/tmp/geometry_drift.pt"
             )
 
+    def test_decoder_mode_does_not_change_checkpoint_contract(self) -> None:
+        legacy = self._model(
+            "libero_rothko", rothko_decode_mode="legacy"
+        )._visual_action_checkpoint_config()
+        robust = self._model(
+            "libero_rothko", rothko_decode_mode="robust_joint"
+        )._visual_action_checkpoint_config()
+        self.assertEqual(legacy, robust)
+
     def test_checkpoint_rejects_norm_stats_content_drift(self) -> None:
         trained = self._model("libero_rothko")
         checkpoint_config = trained._visual_action_checkpoint_config()
@@ -149,6 +165,26 @@ class VisualActionRepresentationMetadataTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Checkpoint VAE mismatch"):
             changed._validate_visual_action_checkpoint_config(
                 checkpoint_config, checkpoint_path="/tmp/vae_drift.pt"
+            )
+
+    def test_checkpoint_separates_joint_and_training_only_future_rgb(self) -> None:
+        joint = self._model("libero_rothko")
+        auxiliary = self._model(
+            "libero_rothko", future_rgb_mode="train_only_auxiliary"
+        )
+        joint_config = joint._visual_action_checkpoint_config()
+        auxiliary_config = auxiliary._visual_action_checkpoint_config()
+        joint_config["video_attention_mask_mode"] = "independent_rgb_aux_ray"
+        with self.assertRaisesRegex(ValueError, "future RGB mode mismatch"):
+            auxiliary._validate_visual_action_checkpoint_config(
+                joint_config, checkpoint_path="/tmp/joint.pt"
+            )
+        auxiliary_config["video_attention_mask_mode"] = (
+            "rgb_then_raymap_block_causal"
+        )
+        with self.assertRaisesRegex(ValueError, "future RGB mode mismatch"):
+            joint._validate_visual_action_checkpoint_config(
+                auxiliary_config, checkpoint_path="/tmp/auxiliary.pt"
             )
 
 

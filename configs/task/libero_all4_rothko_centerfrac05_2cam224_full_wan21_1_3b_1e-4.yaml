@@ -1,0 +1,67 @@
+# @package _global_
+
+defaults:
+  - override /data: libero_rothko_2cam224
+  - override /model: fastwam_video_only_libero_rothko_wan21_1_3b
+  - _self_
+
+output_dir: ./runs/libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4/${now:%Y-%m-%d}_${now:%H-%M-%S}
+
+# Joint training on all four original LIBERO suites with center_frac=0.5.
+data:
+  train:
+    dataset_dirs:
+      - ./data/libero_mujoco3.3.2/libero_spatial_no_noops_lerobot
+      - ./data/libero_mujoco3.3.2/libero_object_no_noops_lerobot
+      - ./data/libero_mujoco3.3.2/libero_goal_no_noops_lerobot
+      - ./data/libero_mujoco3.3.2/libero_10_no_noops_lerobot
+    rothko_norm_stats: ./data/libero_mujoco3.3.2/libero_rothko_region_symmetric_q99p95_h16_224x448.pt
+    rothko_config:
+      center_frac: 0.5
+    # An occasional unreadable window may be replaced during ordinary
+    # training. RobotVideoDataset follows the replacement's actual index when
+    # reading its latent cache, so modalities cannot become misaligned.
+    sample_error_mode: fallback
+    latent_cache_dir: ./data/libero_all4_rothko_centerfrac05_wan21_bf16_h16_latents
+    latent_cache_only: true
+
+# The A800 80GB experiment trades activation memory for speed. This is scoped
+# to the new cache-backed config and does not change prior Wan configs.
+model:
+  video_dit_config:
+    use_gradient_checkpointing: false
+
+# Fastest measured four-GPU equivalent of the established global batch:
+#   4 samples/GPU x 4 GPUs x 8 accumulation = 128 samples/update.
+# On A800 80GB, larger microbatches OOM without checkpointing; enabling
+# checkpointing at 16 x 4 x 2 is about 28% slower per optimizer step.
+batch_size: 4
+num_workers: 8
+gradient_accumulation_steps: 8
+
+lr_scheduler_type: cosine
+learning_rate: 1.0e-4
+num_epochs: 10
+max_steps: null
+log_every: 10
+save_every: 8000
+eval_every: 1000
+eval_num_inference_steps: 20
+eval_sample_index: 0
+eval_num_samples: 4
+eval_random_seed: 42
+
+weight_decay: 1.0e-2
+resume: null
+
+finetune:
+  method: full
+  train_proprio_encoder: false
+
+wandb:
+  enabled: true
+  workspace: null
+  project: fast-wam
+  name: libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4
+  group: libero_all4_rothko_centerfrac_wan21
+  mode: online

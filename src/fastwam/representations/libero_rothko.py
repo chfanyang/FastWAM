@@ -14,9 +14,19 @@ from typing import Any
 import torch
 
 from .rothko import (
+    ROTHKO_DECODE_MODE_LEGACY,
+    ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS,
+    ROTHKO_DECODE_MODE_ROBUST_JOINT,
+    ROTHKO_DECODE_MODE_ROBUST_TILEWISE,
     RothkoNormStats,
     _border_mask,
     _center_and_read_masks,
+    _decode_pose_tiles_robust_block_consensus,
+    _decode_pose_tiles_robust_joint,
+    _decode_pose_tiles_robust_tilewise,
+    _validate_decode_anchor_alpha,
+    _validate_decode_block_grid,
+    _validate_decode_mode,
     matrix_to_quaternion_wxyz,
     quaternion_wxyz_to_matrix,
 )
@@ -70,9 +80,18 @@ class LiberoRothkoCodec:
         config: LiberoRothkoCodecConfig | None = None,
         norm_stats: RothkoNormStats | str | Path | None = None,
         expected_action_horizon: int | None = None,
+        decode_mode: str = ROTHKO_DECODE_MODE_LEGACY,
+        decode_anchor_alpha: float = 0.0,
+        decode_block_grid: int = 4,
     ):
         self.config = config or LiberoRothkoCodecConfig()
         self.config.validate()
+        self.decode_mode = _validate_decode_mode(decode_mode)
+        self.decode_anchor_alpha = _validate_decode_anchor_alpha(
+            decode_anchor_alpha
+        )
+        self.decode_block_grid = _validate_decode_block_grid(decode_block_grid)
+        self._decode_anchor_raw: torch.Tensor | None = None
         self.expected_action_horizon = (
             None if expected_action_horizon is None else int(expected_action_horizon)
         )
@@ -92,6 +111,24 @@ class LiberoRothkoCodec:
                     f"stats={tuple(self.norm_stats.lo.shape)} codec={expected_shape}."
                 )
             self._validate_stats_metadata(self.norm_stats.metadata)
+
+    def set_decode_anchor_video(self, normalized_video: torch.Tensor) -> None:
+        """Cache a VAE-reconstructed zero-motion template for pose anchoring."""
+        if normalized_video.ndim != 5 or normalized_video.shape[0] != 1:
+            raise ValueError(
+                "LIBERO Rothko anchor video must be [1,3,T,H,W], got "
+                f"{tuple(normalized_video.shape)}."
+            )
+        if normalized_video.shape[1] != 3 or normalized_video.shape[-2:] != (
+            self.config.image_height,
+            self.config.image_width,
+        ):
+            raise ValueError(
+                "LIBERO Rothko anchor video channel/spatial shape mismatch: "
+                f"{tuple(normalized_video.shape)}."
+            )
+        normalized = normalized_video.permute(0, 2, 1, 3, 4).contiguous()
+        self._decode_anchor_raw = self.denormalize(normalized).detach()
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -431,13 +468,16 @@ class LiberoRothkoCodec:
         gripper = self.read_gripper(normalized)
         raw = self.denormalize(normalized)
         left = raw[..., : self.config.tile_width]
-        if self.config.duplicate_horizontal:
+        if (
+            self.decode_mode == ROTHKO_DECODE_MODE_LEGACY
+            and self.config.duplicate_horizontal
+        ):
             right = raw[
                 ...,
                 self.config.tile_width : 2 * self.config.tile_width,
             ]
             tile = (left + right) * 0.5
-        else:
+        elif self.decode_mode == ROTHKO_DECODE_MODE_LEGACY:
             tile = left
 
         if current_pose7.ndim == 1:
@@ -446,7 +486,57 @@ class LiberoRothkoCodec:
             raise ValueError(
                 f"Expected current_pose7 {(video.shape[0], 7)}, got {current_pose7.shape}"
             )
-        pose = self._decode_tile_raw(tile, current_pose7)
+        if self.decode_mode == ROTHKO_DECODE_MODE_LEGACY:
+            pose = self._decode_tile_raw(tile, current_pose7)
+        else:
+            tiles = [left]
+            if self.config.duplicate_horizontal:
+                tiles.append(
+                    raw[
+                        ...,
+                        self.config.tile_width : 2 * self.config.tile_width,
+                    ]
+                )
+            cfg = self.config
+            decoder = {
+                ROTHKO_DECODE_MODE_ROBUST_JOINT: _decode_pose_tiles_robust_joint,
+                ROTHKO_DECODE_MODE_ROBUST_TILEWISE: _decode_pose_tiles_robust_tilewise,
+                ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS: (
+                    _decode_pose_tiles_robust_block_consensus
+                ),
+            }[self.decode_mode]
+            decoder_kwargs: dict[str, Any] = {
+                "center_frac": cfg.center_frac,
+                "boundary_margin": cfg.boundary_margin,
+                "outer_margin": cfg.outer_margin,
+                "center_scale": cfg.center_scale,
+                "canonical_directions": self._canonical_directions(
+                    raw.device, torch.float64
+                ),
+                "anchor_alpha": self.decode_anchor_alpha,
+            }
+            if self._decode_anchor_raw is not None:
+                anchor_raw = self._decode_anchor_raw.to(
+                    device=raw.device, dtype=raw.dtype
+                )
+                anchor_tiles = [anchor_raw[..., : self.config.tile_width]]
+                if self.config.duplicate_horizontal:
+                    anchor_tiles.append(
+                        anchor_raw[
+                            ...,
+                            self.config.tile_width : 2 * self.config.tile_width,
+                        ]
+                    )
+                decoder_kwargs["anchor_tiles"] = torch.stack(
+                    anchor_tiles, dim=2
+                )
+            if self.decode_mode == ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS:
+                decoder_kwargs["block_grid"] = self.decode_block_grid
+            pose = decoder(
+                torch.stack(tiles, dim=2),
+                current_pose7,
+                **decoder_kwargs,
+            )
         if squeeze:
             return pose.squeeze(0), gripper.squeeze(0)
         return pose, gripper
