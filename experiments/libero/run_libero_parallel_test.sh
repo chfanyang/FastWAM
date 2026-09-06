@@ -296,6 +296,12 @@ run_libero_eval() {
     # Create a new detached session
     tmux new-session -d -s "$SESSION_NAME"
     SESSION_CREATED=1
+    # Use a minimal, deterministic shell for worker panes. Interactive zsh
+    # startup files can fail independently of the evaluator and leave a pane
+    # idle while the scheduler incorrectly believes that its task is running.
+    tmux set-option -t "$SESSION_NAME" default-shell /bin/bash
+    tmux set-option -t "$SESSION_NAME" default-command "/bin/bash --noprofile --norc"
+    tmux set-environment -t "$SESSION_NAME" TMPDIR "${TMPDIR:-/tmp}"
 
     # Create the grid layout
     create_grid_layout() {
@@ -371,11 +377,11 @@ run_libero_eval() {
         printf -v trials_q '%q' "$NUM_TRIALS"
         printf -v output_q '%q' "$OUTPUT_DIR"
         
-        # Launch the task in a tmux pane.
-        # When the task exits, write a status file so the scheduler can detect failures promptly.
-        tmux select-pane -t "$SESSION_NAME:$pane_info" 2>/dev/null
-        tmux send-keys -t "$SESSION_NAME:$pane_info" "clear" C-m 2>/dev/null
-        tmux send-keys -t "$SESSION_NAME:$pane_info" "cd $root_q && export EXP_NAME=$exp_q && \
+        # Replace the pane shell with the worker command directly. Unlike
+        # send-keys, respawn-pane returns a failure if the target pane does not
+        # exist, so a task cannot silently become a scheduler-only ghost.
+        local worker_command
+        worker_command="cd $root_q && export EXP_NAME=$exp_q && \
             STATUS_FILE=$status_q LOG_FILE=$log_q RESULT_FILE=$result_q && \
             CUDA_VISIBLE_DEVICES=$gpu_q timeout --signal=TERM --kill-after=60 ${WORKER_TIMEOUT_SECONDS}s \
             $python_q experiments/libero/eval_libero_single.py \
@@ -389,8 +395,9 @@ run_libero_eval() {
                 echo \"TIMEOUT|$gpu_id|\$rc|\$(date +%s)|\$LOG_FILE\" > \"\$STATUS_FILE\"; \
             else \
                 echo \"FAILED|$gpu_id|\$rc|\$(date +%s)|\$LOG_FILE\" > \"\$STATUS_FILE\"; \
-            fi" C-m 2>/dev/null
-        return 0
+            fi"
+        tmux respawn-pane -k -t "$SESSION_NAME:$pane_info" \
+            /bin/bash --noprofile --norc -lc "$worker_command"
     }
 
     launch_task() {
@@ -399,10 +406,14 @@ run_libero_eval() {
         local gpu_id=$3
         local pane_info=$4
 
+        if ! launch_task_on_pane "$suite" "$task_id" "$gpu_id" "$pane_info"; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Failed to start task: $suite task_id=$task_id on GPU$gpu_id pane $pane_info"
+            return 1
+        fi
         record_task_gpu_mapping "$suite" "$task_id" "$gpu_id"
         local new_load=$(increment_gpu_load "$gpu_id")
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Assigned task: $suite task_id=$task_id -> GPU$gpu_id (load: $new_load/$MAX_TASKS_PER_GPU)"
-        launch_task_on_pane "$suite" "$task_id" "$gpu_id" "$pane_info"
+        return 0
     }
     
     # Check completed tasks and clean up finished entries
@@ -508,6 +519,16 @@ run_libero_eval() {
         task_id=$(echo $task_info | cut -d, -f2)
         
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Processing task: suite=$suite, task_id=$task_id"
+
+        # Preserve fully completed tasks when restarting in the same output
+        # directory. Their result JSON is the completion marker.
+        result_file_pattern="$OUTPUT_DIR/$suite/gpu*_task${task_id}_results.json"
+        if ls $result_file_pattern 1> /dev/null 2>&1; then
+            grep -v "^$suite,$task_id$" "$PENDING_TASKS_FILE" > "$PENDING_TASKS_FILE.tmp" || true
+            mv "$PENDING_TASKS_FILE.tmp" "$PENDING_TASKS_FILE"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Already complete, skipping: $suite task_id=$task_id"
+            continue
+        fi
         
         # Find the least-loaded GPU
         gpu_id=$(find_least_loaded_gpu)
@@ -528,13 +549,14 @@ run_libero_eval() {
         NEXT_PANE_INDEX=$((NEXT_PANE_INDEX + 1))
         
         # Launch the task
-        launch_task "$suite" "$task_id" "$gpu_id" "$pane_info"
-        
-        ((initial_launched++))
-        
-        # Remove the task from the pending list
-        grep -v "^$suite,$task_id$" "$PENDING_TASKS_FILE" > "$PENDING_TASKS_FILE.tmp" || true
-        mv "$PENDING_TASKS_FILE.tmp" "$PENDING_TASKS_FILE"
+        if launch_task "$suite" "$task_id" "$gpu_id" "$pane_info"; then
+            ((initial_launched++))
+
+            # Remove the task from the pending list only after tmux accepted
+            # the worker command.
+            grep -v "^$suite,$task_id$" "$PENDING_TASKS_FILE" > "$PENDING_TASKS_FILE.tmp" || true
+            mv "$PENDING_TASKS_FILE.tmp" "$PENDING_TASKS_FILE"
+        fi
         
         # Add a small delay to make sure the task starts cleanly
         sleep 0.5
@@ -603,8 +625,11 @@ run_libero_eval() {
                 ensure_pane_exists "$window_id" "$pane_id"
                 NEXT_PANE_INDEX=$((NEXT_PANE_INDEX + 1))
 
-                launch_task "$suite" "$task_id" "$gpu_id" "$pane_info"
-                ((launched_this_round++))
+                if launch_task "$suite" "$task_id" "$gpu_id" "$pane_info"; then
+                    ((launched_this_round++))
+                else
+                    append_unique_pending_task "$suite" "$task_id"
+                fi
 
                 # Limit the number of launches per round to avoid overloading the system
                 if [ $launched_this_round -ge $max_launch_per_round ]; then

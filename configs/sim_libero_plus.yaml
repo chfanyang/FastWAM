@@ -14,6 +14,9 @@ EVALUATION:
   # default; they can be enabled for a smoke test or a diagnostic subset.
   save_rollout_videos: false
   save_prediction_videos: false
+  # Each perturbed instruction is encoded once per task and reused by every
+  # replan in that episode. The cache never crosses task boundaries.
+  cache_prompt_embedding: true
 
 MULTIRUN:
   task_suite_names:
@@ -33,6 +36,9 @@ MULTIRUN:
   # This robosuite version addresses EGL devices by physical index. Rendering
   # on GPU 0 while placing each model on its assigned GPU is the tested setup.
   render_gpu_id: 0
+  # When enabled, each worker renders and runs inference on its assigned GPU.
+  # Keep false by default to preserve prior evaluation behavior.
+  render_on_worker_gpu: false
   resume: true
   continue_on_error: true
   # Optional bounded subsets for smoke tests. End is exclusive.

@@ -156,15 +156,16 @@ def _save_prediction_artifacts(
         if clip.get("pred_raymap_frames"):
             raymap_frames.extend(clip["pred_raymap_frames"])
     trial_id = f"task{task_id}_trial0"
-    save_prediction_video(
-        predicted_video_dir,
-        rollout_frames,
-        predicted_frames,
-        trial_id,
-        "all",
-        success,
-        task_description,
-    )
+    if predicted_frames:
+        save_prediction_video(
+            predicted_video_dir,
+            rollout_frames,
+            predicted_frames,
+            trial_id,
+            "all",
+            success,
+            task_description,
+        )
     if raymap_frames:
         save_model_prediction_video(
             predicted_video_dir,
@@ -204,6 +205,12 @@ def _evaluate_one_task(
     env, task_description = get_libero_plus_env(
         task, LIBERO_ENV_RESOLUTION, cfg.get("seed")
     )
+    prompt_context = None
+    prompt_context_mask = None
+    if bool(cfg.EVALUATION.get("cache_prompt_embedding", False)):
+        prompt = DEFAULT_PROMPT.format(task=task_description)
+        with torch.no_grad():
+            prompt_context, prompt_context_mask = model.encode_prompt(prompt)
     try:
         (
             _loop_success,
@@ -223,6 +230,8 @@ def _evaluate_one_task(
             input_w=input_w,
             input_h=input_h,
             model_device=model_device,
+            prompt_context=prompt_context,
+            prompt_context_mask=prompt_context_mask,
         )
         # Plus success is checked explicitly instead of assuming that every
         # environment ``done`` has identical semantics across perturbations.

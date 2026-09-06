@@ -235,6 +235,7 @@ def main(cfg: DictConfig):
 
     task_choice = _task_choice()
     render_gpu = int(cfg.MULTIRUN.render_gpu_id)
+    render_on_worker_gpu = bool(cfg.MULTIRUN.get("render_on_worker_gpu", False))
     processes = []
     logs = []
     worker_script = project_root / "experiments/libero_plus/eval_libero_plus_worker.py"
@@ -249,20 +250,30 @@ def main(cfg: DictConfig):
         log_handle = log_path.open("w", encoding="utf-8")
         logs.append(log_handle)
 
-        if gpu_id == render_gpu:
+        if render_on_worker_gpu:
+            # The bundled robosuite/MuJoCo EGL backend interprets
+            # MUJOCO_EGL_DEVICE_ID as a physical device index. Expose only the
+            # assigned physical GPU so both rendering and model inference stay
+            # local to that worker's GPU.
             visible = str(gpu_id)
             model_device = "cuda:0"
+            egl_device = gpu_id
+        elif gpu_id == render_gpu:
+            visible = str(gpu_id)
+            model_device = "cuda:0"
+            egl_device = render_gpu
         else:
             # The bundled old robosuite selects EGL by physical index instead
             # of CUDA's remapped logical index. Expose the render GPU first and
             # put the model on logical cuda:1.
             visible = f"{render_gpu},{gpu_id}"
             model_device = "cuda:1"
+            egl_device = render_gpu
         env = os.environ.copy()
         env.update(
             {
                 "CUDA_VISIBLE_DEVICES": visible,
-                "MUJOCO_EGL_DEVICE_ID": str(render_gpu),
+                "MUJOCO_EGL_DEVICE_ID": str(egl_device),
                 "MUJOCO_GL": "egl",
                 "TOKENIZERS_PARALLELISM": "false",
                 "LIBERO_CONFIG_PATH": str(

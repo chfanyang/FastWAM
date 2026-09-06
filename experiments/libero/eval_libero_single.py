@@ -484,6 +484,8 @@ def _predict_action_chunk(
     input_w: int,
     input_h: int,
     model_device: str,
+    prompt_context: Optional[torch.Tensor] = None,
+    prompt_context_mask: Optional[torch.Tensor] = None,
 ) -> tuple[Any, dict, Optional[list[Image.Image]]]:
     num_inference_steps_cfg = cfg.EVALUATION.get("num_inference_steps", None)
     if num_inference_steps_cfg is None:
@@ -530,7 +532,7 @@ def _predict_action_chunk(
             current_gripper.unsqueeze(0),
         )[:, 0].unsqueeze(0)
         visual_kwargs = {
-            "prompt": prompt,
+            "prompt": prompt if prompt_context is None else None,
             "input_image": image,
             "input_raymap": input_raymap.to(
                 device=model_device, dtype=model.torch_dtype
@@ -543,18 +545,28 @@ def _predict_action_chunk(
             "seed": infer_kwargs["seed"],
             "rand_device": infer_kwargs["rand_device"],
             "tiled": infer_kwargs["tiled"],
+            # The RGB latent trajectory is still predicted. Avoid the unused
+            # VAE pixel decode unless prediction artifacts are requested.
+            "decode_future_rgb": _record_prediction_videos(cfg),
         }
+        if prompt_context is not None:
+            if prompt_context_mask is None:
+                raise ValueError(
+                    "prompt_context_mask is required with prompt_context."
+                )
+            visual_kwargs["context"] = prompt_context
+            visual_kwargs["context_mask"] = prompt_context_mask
         with torch.no_grad():
             pred = model.infer(**visual_kwargs)
         if "pose" not in pred or "gripper" not in pred:
             raise ValueError(
                 "LIBERO Rothko model inference did not return pose/gripper."
             )
-        predicted_future_frames = (
-            _select_predicted_future_frames(pred["video"], cfg)
-            if _record_prediction_videos(cfg)
-            else None
-        )
+        predicted_future_frames = None
+        if _record_prediction_videos(cfg) and "video" in pred:
+            predicted_future_frames = _select_predicted_future_frames(
+                pred["video"], cfg
+            )
         visual_chunk = {
             "target_pose": pred["pose"][0, 1:].float().cpu().numpy(),
             "gripper_open": pred["gripper"][0, 1:].float().cpu().numpy(),
@@ -615,6 +627,8 @@ def run_single_episode(
     input_w: int,
     input_h: int,
     model_device: str,
+    prompt_context: Optional[torch.Tensor] = None,
+    prompt_context_mask: Optional[torch.Tensor] = None,
 ) -> tuple[
     bool,
     list,
@@ -671,17 +685,31 @@ def run_single_episode(
                 input_w=input_w,
                 input_h=input_h,
                 model_device=model_device,
+                prompt_context=prompt_context,
+                prompt_context_mask=prompt_context_mask,
             )
             current_replan_idx += 1
-            if predicted_future_frames is not None:
+            predicted_raymap_frames = (
+                action_chunk.get("predicted_raymap_frames")
+                if isinstance(action_chunk, dict)
+                else None
+            )
+            if (
+                predicted_future_frames is not None
+                or predicted_raymap_frames is not None
+            ):
                 current_predicted_future_clip = {
                     "replan_idx": current_replan_idx,
-                    "gt_frames": [imgs.copy()],
-                    "pred_frames": predicted_future_frames,
+                    "gt_frames": (
+                        [imgs.copy()]
+                        if predicted_future_frames is not None
+                        else []
+                    ),
+                    "pred_frames": predicted_future_frames or [],
                 }
-                if isinstance(action_chunk, dict):
+                if predicted_raymap_frames is not None:
                     current_predicted_future_clip["pred_raymap_frames"] = (
-                        action_chunk.get("predicted_raymap_frames")
+                        predicted_raymap_frames
                     )
             else:
                 current_predicted_future_clip = None
@@ -758,56 +786,63 @@ def run_single_episode(
         obs, _, done, _ = env.step(action_to_execute)
         if visualize_future_video and current_predicted_future_clip is not None:
             current_replan_step += 1
-            if current_replan_step in capture_steps:
+            if (
+                current_predicted_future_clip["pred_frames"]
+                and current_replan_step in capture_steps
+            ):
                 current_predicted_future_clip["gt_frames"].append(get_libero_image(obs))
             if done or len(pending_actions) == 0:
                 expected_frame_count = 1 + sum(
                     1 for capture_step in capture_steps if capture_step <= current_replan_step
                 )
-                gt_len = len(current_predicted_future_clip["gt_frames"])
                 pred_len = len(current_predicted_future_clip["pred_frames"])
-                assert gt_len == expected_frame_count, (
-                    "Rollout future frames do not match expected capture count: "
-                    f"gt_len={gt_len} expected={expected_frame_count} "
-                    f"episode={episode_idx} replan={current_predicted_future_clip['replan_idx']} "
-                    f"current_replan_step={current_replan_step} capture_steps={sorted(capture_steps)}."
-                )
-                assert pred_len >= expected_frame_count, (
-                    "Predicted future frames shorter than expected capture count: "
-                    f"pred_len={pred_len} expected={expected_frame_count} "
-                    f"episode={episode_idx} replan={current_predicted_future_clip['replan_idx']}."
-                )
-                if pred_len != expected_frame_count:
-                    logging.info(
-                        "Align predicted clip length to executed steps: "
-                        "episode=%s replan=%s done=%s expected=%s pred_full=%s",
-                        episode_idx,
-                        current_predicted_future_clip["replan_idx"],
-                        done,
-                        expected_frame_count,
-                        pred_len,
+                if pred_len:
+                    gt_len = len(current_predicted_future_clip["gt_frames"])
+                    assert gt_len == expected_frame_count, (
+                        "Rollout future frames do not match expected capture count: "
+                        f"gt_len={gt_len} expected={expected_frame_count} "
+                        f"episode={episode_idx} replan={current_predicted_future_clip['replan_idx']} "
+                        f"current_replan_step={current_replan_step} capture_steps={sorted(capture_steps)}."
                     )
-                current_predicted_future_clip["pred_frames"] = current_predicted_future_clip["pred_frames"][
-                    :expected_frame_count
-                ]
+                    assert pred_len >= expected_frame_count, (
+                        "Predicted future frames shorter than expected capture count: "
+                        f"pred_len={pred_len} expected={expected_frame_count} "
+                        f"episode={episode_idx} replan={current_predicted_future_clip['replan_idx']}."
+                    )
+                    if pred_len != expected_frame_count:
+                        logging.info(
+                            "Align predicted clip length to executed steps: "
+                            "episode=%s replan=%s done=%s expected=%s pred_full=%s",
+                            episode_idx,
+                            current_predicted_future_clip["replan_idx"],
+                            done,
+                            expected_frame_count,
+                            pred_len,
+                        )
+                    current_predicted_future_clip["pred_frames"] = (
+                        current_predicted_future_clip["pred_frames"][
+                            :expected_frame_count
+                        ]
+                    )
                 if current_predicted_future_clip.get("pred_raymap_frames") is not None:
                     current_predicted_future_clip["pred_raymap_frames"] = (
                         current_predicted_future_clip["pred_raymap_frames"][:expected_frame_count]
                     )
-                assert len(current_predicted_future_clip["gt_frames"]) == len(
-                    current_predicted_future_clip["pred_frames"]
-                ), (
-                    "Rollout/pred frame count mismatch after alignment: "
-                    f"len(gt_frames)={len(current_predicted_future_clip['gt_frames'])} "
-                    f"len(pred_frames)={len(current_predicted_future_clip['pred_frames'])} "
-                    f"episode={episode_idx} replan={current_predicted_future_clip['replan_idx']}."
-                )
-                clip_psnr = _compute_clip_mean_psnr(
-                    current_predicted_future_clip["gt_frames"],
-                    current_predicted_future_clip["pred_frames"],
-                )
-                if clip_psnr is not None:
-                    episode_future_clip_psnr.append(clip_psnr)
+                if pred_len:
+                    assert len(current_predicted_future_clip["gt_frames"]) == len(
+                        current_predicted_future_clip["pred_frames"]
+                    ), (
+                        "Rollout/pred frame count mismatch after alignment: "
+                        f"len(gt_frames)={len(current_predicted_future_clip['gt_frames'])} "
+                        f"len(pred_frames)={len(current_predicted_future_clip['pred_frames'])} "
+                        f"episode={episode_idx} replan={current_predicted_future_clip['replan_idx']}."
+                    )
+                    clip_psnr = _compute_clip_mean_psnr(
+                        current_predicted_future_clip["gt_frames"],
+                        current_predicted_future_clip["pred_frames"],
+                    )
+                    if clip_psnr is not None:
+                        episode_future_clip_psnr.append(clip_psnr)
                 predicted_future_video_clips.append(current_predicted_future_clip)
                 current_predicted_future_clip = None
         executed_any_action = True
@@ -924,15 +959,16 @@ def run_single_task(
                     raymap_frames = clip.get("pred_raymap_frames")
                     if raymap_frames:
                         all_pred_raymap_frames.extend(raymap_frames)
-                save_prediction_video(
-                    predicted_video_dir,
-                    all_gt_frames,
-                    all_pred_frames,
-                    f"task{cfg.EVALUATION.task_id}_trial{trial_idx}",
-                    "all",
-                    success=success,
-                    task_description=task_description,
-                )
+                if all_pred_frames:
+                    save_prediction_video(
+                        predicted_video_dir,
+                        all_gt_frames,
+                        all_pred_frames,
+                        f"task{cfg.EVALUATION.task_id}_trial{trial_idx}",
+                        "all",
+                        success=success,
+                        task_description=task_description,
+                    )
                 if all_pred_raymap_frames:
                     save_model_prediction_video(
                         predicted_video_dir,
