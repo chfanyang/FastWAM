@@ -28,6 +28,77 @@ from .utils.video_metrics import pil_frames_to_video_tensor, video_psnr, video_s
 logger = get_logger(__name__)
 
 
+def load_fixed_validation_manifest(
+    path: str | Path,
+    *,
+    expected_split_manifest_sha256: str,
+    val_dataset_length: int,
+) -> dict:
+    """Load a fixed loss/visual validation window manifest."""
+    manifest_path = Path(path)
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Fixed validation manifest does not exist: {manifest_path}"
+        )
+    payload = json.loads(manifest_path.read_text())
+    if int(payload.get("version", -1)) != 1:
+        raise ValueError(
+            f"Unsupported fixed validation manifest version in {manifest_path}: "
+            f"{payload.get('version')!r}"
+        )
+    actual_split_sha256 = str(payload.get("split_manifest_sha256", ""))
+    if actual_split_sha256 != expected_split_manifest_sha256:
+        raise ValueError(
+            "Fixed validation manifest split fingerprint mismatch: "
+            f"manifest={actual_split_sha256!r}, "
+            f"dataset={expected_split_manifest_sha256!r}."
+        )
+    samples = payload.get("samples")
+    if not isinstance(samples, list) or not samples:
+        raise ValueError(f"Fixed validation manifest has no samples: {manifest_path}")
+    required = {
+        "sample_id",
+        "val_dataset_index",
+        "episode_index",
+        "frame_index",
+        "task_index",
+        "diffusion_seed",
+        "run_visual",
+    }
+    sample_ids = set()
+    dataset_indices = set()
+    visual_count = 0
+    for offset, record in enumerate(samples):
+        if not isinstance(record, dict):
+            raise ValueError(f"Sample {offset} in {manifest_path} is not an object.")
+        missing = required - set(record)
+        if missing:
+            raise ValueError(
+                f"Sample {offset} in {manifest_path} misses {sorted(missing)}."
+            )
+        sample_id = str(record["sample_id"])
+        dataset_index = int(record["val_dataset_index"])
+        if sample_id in sample_ids:
+            raise ValueError(f"Duplicate sample_id {sample_id!r} in {manifest_path}.")
+        if dataset_index in dataset_indices:
+            raise ValueError(
+                f"Duplicate val_dataset_index {dataset_index} in {manifest_path}."
+            )
+        if not 0 <= dataset_index < val_dataset_length:
+            raise ValueError(
+                f"val_dataset_index {dataset_index} is outside [0,{val_dataset_length}) "
+                f"in {manifest_path}."
+            )
+        sample_ids.add(sample_id)
+        dataset_indices.add(dataset_index)
+        visual_count += int(bool(record["run_visual"]))
+    if visual_count < 1:
+        raise ValueError(f"Fixed validation manifest selects no visual samples: {manifest_path}")
+    payload["path"] = str(manifest_path.resolve())
+    payload["sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    return payload
+
+
 def _decoded_pose_metrics(
     predicted_pose: torch.Tensor,
     target_pose: torch.Tensor,
@@ -87,6 +158,11 @@ class Wan22Trainer:
         self.cfg = cfg
         self.output_dir = str(cfg.output_dir)
         self.learning_rate = float(cfg.learning_rate)
+        self.warmup_ratio = float(cfg.get("warmup_ratio", 0.05))
+        if not 0.0 <= self.warmup_ratio < 1.0:
+            raise ValueError(
+                f"`warmup_ratio` must be in [0, 1), got {self.warmup_ratio}."
+            )
         self.weight_decay = float(cfg.weight_decay)
         self.batch_size = int(cfg.batch_size)
         self.num_workers = int(cfg.num_workers)
@@ -96,11 +172,25 @@ class Wan22Trainer:
         self.max_steps = int(max_steps) if max_steps is not None else None
         self.log_every = int(cfg.log_every)
         self.save_every = int(cfg.save_every)
+        state_save_every = cfg.get("state_save_every")
+        self.state_save_every = (
+            self.save_every
+            if state_save_every is None
+            else int(state_save_every)
+        )
+        self.save_at_end = bool(cfg.get("save_at_end", True))
         self.eval_every = int(cfg.eval_every)
+        self.eval_at_start = bool(cfg.get("eval_at_start", False))
         self.eval_num_inference_steps = int(cfg.eval_num_inference_steps)
         self.eval_sample_index = int(cfg.get("eval_sample_index", 0))
         self.eval_num_samples = int(cfg.get("eval_num_samples", 4))
         self.eval_random_seed = int(cfg.get("eval_random_seed", 42))
+        self.eval_sample_manifest_path = cfg.get("eval_sample_manifest")
+        if self.eval_sample_manifest_path in (None, "", "null"):
+            self.eval_sample_manifest_path = None
+        else:
+            self.eval_sample_manifest_path = str(self.eval_sample_manifest_path)
+        self.fixed_validation_manifest = None
         if self.eval_sample_index < 0:
             raise ValueError(
                 f"`eval_sample_index` must be non-negative, got {self.eval_sample_index}."
@@ -172,6 +262,31 @@ class Wan22Trainer:
         self._assert_dataset_length_consistent(self.train_dataset, "train_dataset")
         if self.val_dataset is not None:
             self._assert_dataset_length_consistent(self.val_dataset, "val_dataset")
+        if self.eval_sample_manifest_path is not None:
+            if self.val_dataset is None:
+                raise ValueError("`eval_sample_manifest` requires a validation dataset.")
+            split_metadata = getattr(self.val_dataset, "episode_split_metadata", None)
+            if not split_metadata or split_metadata.get("split") != "val":
+                raise ValueError(
+                    "`eval_sample_manifest` requires a validation dataset built "
+                    "from `episode_split=val`."
+                )
+            self.fixed_validation_manifest = load_fixed_validation_manifest(
+                self.eval_sample_manifest_path,
+                expected_split_manifest_sha256=str(split_metadata["sha256"]),
+                val_dataset_length=len(self.val_dataset),
+            )
+            logger.info(
+                "Using fixed validation manifest: path=%s sha256=%s "
+                "loss_samples=%d visual_samples=%d",
+                self.fixed_validation_manifest["path"],
+                self.fixed_validation_manifest["sha256"],
+                len(self.fixed_validation_manifest["samples"]),
+                sum(
+                    bool(record["run_visual"])
+                    for record in self.fixed_validation_manifest["samples"]
+                ),
+            )
 
         # Freeze non-trainable modules before optimizer/deepspeed initialization.
         # This keeps DiT (+ optional proprio encoder) as trainable when ZeRO builds optimizer state.
@@ -206,7 +321,7 @@ class Wan22Trainer:
         self.train_loader = self._build_loader(self.train_dataset, worker_init_fn=worker_init_fn)
         total_train_steps = self._estimate_total_train_steps()
         self.max_steps = total_train_steps
-        warmup_steps = int(total_train_steps * 0.05)
+        warmup_steps = int(total_train_steps * self.warmup_ratio)
         self.scheduler = self._build_scheduler(
             scheduler_type=cfg.lr_scheduler_type,
             total_train_steps=total_train_steps,
@@ -544,19 +659,22 @@ class Wan22Trainer:
         *,
         eval_sample_index: int,
         eval_seed: int,
+        compute_val_loss: bool = True,
     ):
         cuda_devices = []
         if self.accelerator.device.type == "cuda":
             cuda_devices = [self.accelerator.device.index]
         # Validation must not consume or perturb training RNG state.  The same
         # fixed sample receives the same timestep/noise at every evaluation.
-        with torch.random.fork_rng(devices=cuda_devices):
-            torch.manual_seed(eval_seed)
-            if self.accelerator.device.type == "cuda":
-                torch.cuda.manual_seed(eval_seed)
-            with self.accelerator.autocast():
-                val_loss, _ = model.training_loss(sample)
-                val_loss_value = float(val_loss.float().item())
+        val_loss_value = None
+        if compute_val_loss:
+            with torch.random.fork_rng(devices=cuda_devices):
+                torch.manual_seed(eval_seed)
+                if self.accelerator.device.type == "cuda":
+                    torch.cuda.manual_seed(eval_seed)
+                with self.accelerator.autocast():
+                    val_loss, _ = model.training_loss(sample)
+                    val_loss_value = float(val_loss.float().item())
 
         video0 = sample["video"][0]
         raymap0 = sample["raymap"][0]
@@ -575,18 +693,9 @@ class Wan22Trainer:
             "tiled": False,
         }
         prediction = model.infer(**infer_kwargs)
-        predicted_video = pil_frames_to_video_tensor(prediction["video"])
         target_video = (
             (video0.detach().float().cpu().clamp(-1, 1) + 1.0) * 0.5
         ).contiguous()
-        if predicted_video.shape != target_video.shape:
-            raise ValueError(
-                f"Visual-action RGB shape mismatch: {predicted_video.shape} "
-                f"vs {target_video.shape}"
-            )
-        psnr_rollout_vs_gt = video_psnr(predicted_video, target_video)
-        ssim_rollout_vs_gt = video_ssim(predicted_video, target_video)
-
         rgb_latents = model._encode_video_latents(
             video0.unsqueeze(0).to(model.device, model.torch_dtype)
         )
@@ -594,8 +703,39 @@ class Wan22Trainer:
         vae_video = ((vae_video.cpu() + 1.0) * 0.5).clamp(0, 1)
         psnr_decode_vs_gt = video_psnr(vae_video, target_video)
         ssim_decode_vs_gt = video_ssim(vae_video, target_video)
-        psnr_rollout_vs_decode = video_psnr(predicted_video, vae_video)
-        ssim_rollout_vs_decode = video_ssim(predicted_video, vae_video)
+
+        psnr_rollout_vs_gt = ssim_rollout_vs_gt = None
+        psnr_rollout_vs_decode = ssim_rollout_vs_decode = None
+        if "video" in prediction:
+            predicted_video = pil_frames_to_video_tensor(prediction["video"])
+            if predicted_video.shape != target_video.shape:
+                raise ValueError(
+                    f"Visual-action RGB shape mismatch: {predicted_video.shape} "
+                    f"vs {target_video.shape}"
+                )
+            psnr_rollout_vs_gt = video_psnr(predicted_video, target_video)
+            ssim_rollout_vs_gt = video_ssim(predicted_video, target_video)
+            psnr_rollout_vs_decode = video_psnr(predicted_video, vae_video)
+            ssim_rollout_vs_decode = video_ssim(predicted_video, vae_video)
+            stitched = torch.cat(
+                (predicted_video, vae_video, target_video), dim=2
+            ).contiguous()
+        else:
+            predicted_raymap = (
+                (prediction["raymap"][0].detach().float().cpu().clamp(-1, 1) + 1.0)
+                * 0.5
+            ).contiguous()
+            target_raymap = (
+                (raymap0.detach().float().cpu().clamp(-1, 1) + 1.0) * 0.5
+            ).contiguous()
+            if predicted_raymap.shape != target_raymap.shape:
+                raise ValueError(
+                    "Visual-action Raymap shape mismatch: "
+                    f"{predicted_raymap.shape} vs {target_raymap.shape}"
+                )
+            stitched = torch.cat(
+                (predicted_raymap, target_raymap), dim=2
+            ).contiguous()
 
         predicted_pose = prediction.get("pose")
         predicted_gripper = prediction.get("gripper")
@@ -635,9 +775,6 @@ class Wan22Trainer:
                 target_future_gripper,
             )
 
-        stitched = torch.cat(
-            (predicted_video, vae_video, target_video), dim=2
-        ).contiguous()
         stitched_frames = [
             Image.fromarray(
                 (
@@ -660,15 +797,21 @@ class Wan22Trainer:
         if was_dit_training:
             self._set_dit_only_train_mode()
         result = {
-            "val_loss": val_loss_value,
-            "psnr_rg": float(psnr_rollout_vs_gt),
-            "ssim_rg": float(ssim_rollout_vs_gt),
-            "psnr_rd": float(psnr_rollout_vs_decode),
-            "ssim_rd": float(ssim_rollout_vs_decode),
             "psnr_dg": float(psnr_decode_vs_gt),
             "ssim_dg": float(ssim_decode_vs_gt),
             "video_path": video_path,
         }
+        if val_loss_value is not None:
+            result["val_loss"] = val_loss_value
+        if psnr_rollout_vs_gt is not None:
+            result.update(
+                {
+                    "psnr_rg": float(psnr_rollout_vs_gt),
+                    "ssim_rg": float(ssim_rollout_vs_gt),
+                    "psnr_rd": float(psnr_rollout_vs_decode),
+                    "ssim_rd": float(ssim_rollout_vs_decode),
+                }
+            )
         if representation_l2 is not None:
             result.update(pose_metrics)
             result["decoded_target_l2"] = representation_l2
@@ -677,6 +820,134 @@ class Wan22Trainer:
                 # Preserve the existing RoboTwin metric names.
                 result["action_l2"] = representation_l2
                 result["action_l1"] = representation_l1
+        return result
+
+    def _fixed_visual_action_loss(self, model, sample, seed: int) -> float:
+        cuda_devices = []
+        if self.accelerator.device.type == "cuda":
+            cuda_devices = [self.accelerator.device.index]
+        with torch.random.fork_rng(devices=cuda_devices):
+            torch.manual_seed(seed)
+            if self.accelerator.device.type == "cuda":
+                torch.cuda.manual_seed(seed)
+            with self.accelerator.autocast():
+                val_loss, _ = model.training_loss(sample)
+        return float(val_loss.float().item())
+
+    def _evaluate_visual_action_manifest(self, model, was_dit_training: bool):
+        records = self.fixed_validation_manifest["samples"]
+        local_loss_values = []
+        for record_offset in range(
+            self.accelerator.process_index,
+            len(records),
+            self.accelerator.num_processes,
+        ):
+            record = records[record_offset]
+            eval_index = int(record["val_dataset_index"])
+            eval_seed = int(record["diffusion_seed"])
+            sample = self._get_fixed_visual_action_eval_sample(eval_index, eval_seed)
+            local_loss_values.append(
+                self._fixed_visual_action_loss(model, sample, eval_seed)
+            )
+
+        loss_totals = torch.tensor(
+            [[sum(local_loss_values), len(local_loss_values)]],
+            device=self.accelerator.device,
+            dtype=torch.float64,
+        )
+        gathered_loss = self.accelerator.gather(loss_totals).sum(dim=0)
+        loss_count = int(gathered_loss[1])
+        if loss_count != len(records):
+            raise RuntimeError(
+                "Fixed validation loss sample count mismatch: "
+                f"gathered={loss_count}, expected={len(records)}."
+            )
+        result = {"val_loss": float(gathered_loss[0]) / loss_count}
+
+        visual_records = [record for record in records if bool(record["run_visual"])]
+        local_visual_results = []
+        for visual_offset in range(
+            self.accelerator.process_index,
+            len(visual_records),
+            self.accelerator.num_processes,
+        ):
+            record = visual_records[visual_offset]
+            eval_index = int(record["val_dataset_index"])
+            eval_seed = int(record["diffusion_seed"])
+            sample = self._get_fixed_visual_action_eval_sample(eval_index, eval_seed)
+            local_visual_results.append(
+                self._evaluate_visual_action(
+                    model,
+                    sample,
+                    False,
+                    eval_sample_index=eval_index,
+                    eval_seed=eval_seed,
+                    compute_val_loss=False,
+                )
+            )
+
+        visual_metric_keys = (
+            "psnr_rg",
+            "ssim_rg",
+            "psnr_rd",
+            "ssim_rd",
+            "psnr_dg",
+            "ssim_dg",
+            "decoded_target_l2",
+            "decoded_target_l1",
+            "action_l2",
+            "action_l1",
+            "decoded_position_mae_m",
+            "decoded_position_rmse_m",
+            "decoded_rotation_geodesic_deg",
+            "decoded_gripper_mae",
+            "decoded_gripper_accuracy",
+        )
+        metric_totals = []
+        for key in visual_metric_keys:
+            values = [
+                float(sample_result[key])
+                for sample_result in local_visual_results
+                if key in sample_result
+            ]
+            metric_totals.extend((sum(values), len(values)))
+        metric_totals = torch.tensor(
+            metric_totals,
+            device=self.accelerator.device,
+            dtype=torch.float64,
+        ).unsqueeze(0)
+        gathered_totals = self.accelerator.gather(metric_totals).sum(dim=0)
+        for key_index, key in enumerate(visual_metric_keys):
+            total = float(gathered_totals[key_index * 2])
+            count = int(gathered_totals[key_index * 2 + 1])
+            if count:
+                result[key] = total / count
+
+        result["eval_sample_indices"] = [
+            int(record["val_dataset_index"]) for record in records
+        ]
+        result["visual_eval_sample_indices"] = [
+            int(record["val_dataset_index"]) for record in visual_records
+        ]
+        result["video_paths"] = [
+            os.path.join(
+                self.eval_dir,
+                f"step_{self.global_step:06d}"
+                f"_rank_{offset % self.accelerator.num_processes:03d}"
+                f"_sample_{int(record['val_dataset_index']):06d}.mp4",
+            )
+            for offset, record in enumerate(visual_records)
+        ]
+        result["video_path"] = result["video_paths"][0]
+        if was_dit_training:
+            self._set_dit_only_train_mode()
+        logger.info(
+            "Evaluated fixed manifest: loss_samples=%d visual_samples=%d "
+            "across %d rank(s).",
+            len(records),
+            len(visual_records),
+            self.accelerator.num_processes,
+        )
         return result
 
     @torch.no_grad()
@@ -689,6 +960,8 @@ class Wan22Trainer:
         model.eval()
 
         if getattr(model, "is_visual_action_model", False):
+            if self.fixed_validation_manifest is not None:
+                return self._evaluate_visual_action_manifest(model, was_dit_training)
             metric_keys = (
                 "val_loss",
                 "psnr_rg",
@@ -1017,6 +1290,7 @@ class Wan22Trainer:
             "mixed_precision": self.mixed_precision,
             "seed": self.seed,
             "learning_rate": self.learning_rate,
+            "warmup_ratio": self.warmup_ratio,
             "weight_decay": self.weight_decay,
             "lr_scheduler_type": cfg.get("lr_scheduler_type"),
             "max_grad_norm": self.max_grad_norm,
@@ -1076,21 +1350,26 @@ class Wan22Trainer:
             "the optimizer/scheduler/dataloader state is compatible."
         )
 
-    def save_checkpoint(self):
+    def save_checkpoint(self, *, save_weights: bool = True, save_state: bool = True):
+        if not save_weights and not save_state:
+            raise ValueError("At least one of `save_weights` or `save_state` must be true.")
         step_tag = f"step_{self.global_step:06d}"
 
-        self.accelerator.wait_for_everyone()
         ckpt_path = None
-        if self.accelerator.is_main_process:
-            ckpt_path = self._save_weights_checkpoint(step_tag=step_tag)
-        self.accelerator.wait_for_everyone()
+        if save_weights:
+            self.accelerator.wait_for_everyone()
+            if self.accelerator.is_main_process:
+                ckpt_path = self._save_weights_checkpoint(step_tag=step_tag)
+            self.accelerator.wait_for_everyone()
 
-        state_path = os.path.join(self.state_dir, step_tag)
-        ensure_dir(state_path)
-        self.accelerator.save_state(output_dir=state_path)
-        if self.accelerator.is_main_process:
-            self._save_trainer_state(state_path)
-        self.accelerator.wait_for_everyone()
+        state_path = None
+        if save_state:
+            state_path = os.path.join(self.state_dir, step_tag)
+            ensure_dir(state_path)
+            self.accelerator.save_state(output_dir=state_path)
+            if self.accelerator.is_main_process:
+                self._save_trainer_state(state_path)
+            self.accelerator.wait_for_everyone()
 
         return {"weights_path": ckpt_path, "state_path": state_path}
 
@@ -1156,6 +1435,21 @@ class Wan22Trainer:
         data_iter = iter(self.train_loader)
         self.run_start_step = self.global_step
         self.run_start_time = time.perf_counter()
+
+        if self.eval_at_start:
+            metrics = self.evaluate()
+            self.accelerator.wait_for_everyone()
+            if metrics is not None and self.accelerator.is_main_process:
+                logger.info(
+                    "[eval/start] step=%d val_loss=%.4f metrics=%s",
+                    self.global_step,
+                    metrics["val_loss"],
+                    {
+                        key: value
+                        for key, value in metrics.items()
+                        if isinstance(value, (int, float))
+                    },
+                )
 
         while self.global_step < self.max_steps:
             try:
@@ -1234,12 +1528,20 @@ class Wan22Trainer:
                         metrics = self.evaluate()
                         self.accelerator.wait_for_everyone()
                         if metrics is not None and self.accelerator.is_main_process:
-                            description = "[eval] step=%d val_loss=%.4f infer_psnr=%.4f infer_ssim=%.4f" % (
+                            description = "[eval] step=%d val_loss=%.4f" % (
                                 self.global_step,
                                 metrics["val_loss"],
-                                metrics["psnr_rd"],
-                                metrics["ssim_rd"],
                             )
+                            if "psnr_rd" in metrics:
+                                description += " infer_psnr=%.4f infer_ssim=%.4f" % (
+                                    metrics["psnr_rd"],
+                                    metrics["ssim_rd"],
+                                )
+                            if "psnr_dg" in metrics:
+                                description += " vae_psnr=%.4f vae_ssim=%.4f" % (
+                                    metrics["psnr_dg"],
+                                    metrics["ssim_dg"],
+                                )
                             if "action_l2" in metrics:
                                 description += " action_l2=%.4f" % metrics["action_l2"]
                             if "action_l1" in metrics:
@@ -1261,15 +1563,17 @@ class Wan22Trainer:
                                     "decoded_rotation_geodesic_deg"
                                 ]
                             logger.info(description)
-                            eval_payload = {
-                                "eval/val_loss": float(metrics["val_loss"]),
-                                "eval/psnr_rg": float(metrics["psnr_rg"]),
-                                "eval/ssim_rg": float(metrics["ssim_rg"]),
-                                "eval/psnr_rd": float(metrics["psnr_rd"]),
-                                "eval/ssim_rd": float(metrics["ssim_rd"]),
-                                "eval/psnr_dg": float(metrics["psnr_dg"]),
-                                "eval/ssim_dg": float(metrics["ssim_dg"]),
-                            }
+                            eval_payload = {"eval/val_loss": float(metrics["val_loss"])}
+                            for key in (
+                                "psnr_rg",
+                                "ssim_rg",
+                                "psnr_rd",
+                                "ssim_rd",
+                                "psnr_dg",
+                                "ssim_dg",
+                            ):
+                                if key in metrics:
+                                    eval_payload[f"eval/{key}"] = float(metrics[key])
                             if "action_l2" in metrics:
                                 eval_payload["eval/action_l2"] = float(metrics["action_l2"])
                             if "action_l1" in metrics:
@@ -1293,8 +1597,23 @@ class Wan22Trainer:
                                     eval_payload[f"eval/{key}"] = float(metrics[key])
                             self._wandb_log(eval_payload)
 
-                    if self.save_every > 0 and self.global_step % self.save_every == 0:
-                        ckpt_info = self.save_checkpoint()
+                    weights_saved_this_step = False
+                    state_saved_this_step = False
+                    weights_due = (
+                        self.save_every > 0
+                        and self.global_step % self.save_every == 0
+                    )
+                    state_due = (
+                        self.state_save_every > 0
+                        and self.global_step % self.state_save_every == 0
+                    )
+                    if weights_due or state_due:
+                        ckpt_info = self.save_checkpoint(
+                            save_weights=weights_due,
+                            save_state=state_due,
+                        )
+                        weights_saved_this_step = weights_due
+                        state_saved_this_step = state_due
                         if self.accelerator.is_main_process:
                             logger.info(
                                 "[ckpt] step=%d weights=%s state=%s",
@@ -1304,22 +1623,43 @@ class Wan22Trainer:
                             )
 
                     if self.global_step >= self.max_steps:
-                        ckpt_info = self.save_checkpoint()
-                        if self.accelerator.is_main_process:
+                        if self.save_at_end:
+                            if not (weights_saved_this_step and state_saved_this_step):
+                                final_ckpt_info = self.save_checkpoint(
+                                    save_weights=not weights_saved_this_step,
+                                    save_state=not state_saved_this_step,
+                                )
+                                if weights_saved_this_step:
+                                    final_ckpt_info["weights_path"] = ckpt_info["weights_path"]
+                                if state_saved_this_step:
+                                    final_ckpt_info["state_path"] = ckpt_info["state_path"]
+                                ckpt_info = final_ckpt_info
+                            if self.accelerator.is_main_process:
+                                logger.info(
+                                    "[done] max_steps reached step=%d weights=%s state=%s",
+                                    self.global_step,
+                                    ckpt_info["weights_path"],
+                                    ckpt_info["state_path"],
+                                )
+                        elif self.accelerator.is_main_process:
                             logger.info(
-                                "[done] max_steps reached step=%d weights=%s state=%s",
+                                "[done] max_steps reached step=%d; final checkpoint disabled.",
                                 self.global_step,
-                                ckpt_info["weights_path"],
-                                ckpt_info["state_path"],
                             )
                         return
 
-        ckpt_info = self.save_checkpoint()
-        if self.accelerator.is_main_process:
+        if self.save_at_end:
+            ckpt_info = self.save_checkpoint()
+            if self.accelerator.is_main_process:
+                logger.info(
+                    "[done] training finished step=%d weights=%s state=%s",
+                    self.global_step,
+                    ckpt_info["weights_path"],
+                    ckpt_info["state_path"],
+                )
+        elif self.accelerator.is_main_process:
             logger.info(
-                "[done] training finished step=%d weights=%s state=%s",
+                "[done] training finished step=%d; final checkpoint disabled.",
                 self.global_step,
-                ckpt_info["weights_path"],
-                ckpt_info["state_path"],
             )
         

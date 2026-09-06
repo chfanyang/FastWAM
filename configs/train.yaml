@@ -17,11 +17,17 @@ pin_memory: true
 # scheduler
 lr_scheduler_type: "cosine"
 learning_rate: 1.0e-4
+warmup_ratio: 0.05
 num_epochs: 1
 max_steps: null
 log_every: 10
 save_every: 100
+# Optional independent interval for full resumable training state. When null,
+# preserve the legacy behavior and save state whenever weights are saved.
+state_save_every: null
+save_at_end: true
 eval_every: 50
+eval_at_start: false
 eval_num_inference_steps: 10
 eval_sample_index: 0
 eval_num_samples: 4

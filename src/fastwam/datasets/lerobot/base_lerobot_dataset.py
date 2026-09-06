@@ -36,6 +36,7 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         episode_indices: Optional[List[int]] = None,
         raw_action_meta: Optional[List[Dict[str, Any]]] = None,
         raw_state_meta: Optional[List[Dict[str, Any]]] = None,
+        sample_error_mode: str = "fallback",
     ):
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
         assert past_action_size == 0
@@ -48,6 +49,13 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         self.past_action_size = past_action_size
         self.obs_size = obs_size
         self.processor = None  # Will be set externally
+        self.return_images = True
+        self.sample_error_mode = str(sample_error_mode)
+        if self.sample_error_mode not in {"fallback", "raise"}:
+            raise ValueError(
+                "`sample_error_mode` must be 'fallback' or 'raise', got "
+                f"{self.sample_error_mode!r}."
+            )
         metas = []
         for ds_dir in dataset_dirs:
             ds_root = Path(ds_dir)
@@ -245,6 +253,22 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
             except Exception as err:
                 attempt += 1
                 last_exception = err
+                if self.sample_error_mode == "raise":
+                    if attempt >= MAX_GETITEM_ATTEMPT:
+                        raise RuntimeError(
+                            f"Error loading sample {sample_idx} after "
+                            f"{attempt} attempts."
+                        ) from err
+                    logger.warning(
+                        "Error loading sample %d (attempt %d/%d). "
+                        "Retrying the same index because random substitution "
+                        "is disabled. Error: %s",
+                        sample_idx,
+                        attempt,
+                        MAX_GETITEM_ATTEMPT,
+                        err,
+                    )
+                    continue
                 logger.warning(
                     f"Error loading sample {sample_idx} (attempt {attempt}). "
                     "Retrying with a random index. "
@@ -279,8 +303,11 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         for meta in self.raw_state_meta:
             sample["raw_state"][meta["key"]] = self._get_state(meta, lerobot_sample)
 
-        for meta in self.image_meta:
-            sample["images"][meta["key"]] = self._get_image(meta, lerobot_sample)
+        if self.return_images:
+            for meta in self.image_meta:
+                sample["images"][meta["key"]] = self._get_image(
+                    meta, lerobot_sample
+                )
 
         sample["action_is_pad"] = lerobot_sample[f"{self.action_meta[0]['lerobot_key']}_is_pad"]
         sample["state_is_pad"] = lerobot_sample[f"{self.state_meta[0]['lerobot_key']}_is_pad"]

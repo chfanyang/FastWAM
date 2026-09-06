@@ -55,6 +55,7 @@ class FastWAMProcessor(BaseProcessor):
         self.val_transforms = val_transforms
 
         self._is_train = None
+        self.process_images = True
 
         self.action_state_transforms = action_state_transforms
         self.action_state_merger = action_state_merger
@@ -106,6 +107,10 @@ class FastWAMProcessor(BaseProcessor):
 
     def eval(self):
         self._is_train = False
+        return self
+
+    def set_process_images(self, enabled: bool):
+        self.process_images = bool(enabled)
         return self
 
     def set_normalizer_from_stats(self, dataset_stats: Dict[str, Any] = None):
@@ -212,35 +217,36 @@ class FastWAMProcessor(BaseProcessor):
         sample["image_is_pad"] = data["image_is_pad"]
 
         # 2. image
-        processed_images = []
-        for meta in self.shape_meta["images"]:
-            key, shape = meta["key"], meta["shape"]
-            image = data["images"][key]  # [num_obs_steps, C, H, W]
-            assert image.ndim == 4, f"Expected 4 dimensions (num_obs_steps, C, H, W), got shape {image.shape}"
-            
-            # Apply transforms efficiently on the merged batch
-            transforms = self.train_transforms if self.is_train else self.val_transforms
-            current_transforms = transforms[key] if isinstance(transforms, dict) else transforms
-            for trans in current_transforms:
-                image = trans(image)
-            
-            meta_shape = [self.num_obs_steps] + shape
-            assert image.shape == meta_shape, \
-                f"Expected shape {meta_shape}, got {image.shape} after transforms for key {key}"
+        if self.process_images:
+            processed_images = []
+            for meta in self.shape_meta["images"]:
+                key, shape = meta["key"], meta["shape"]
+                image = data["images"][key]  # [num_obs_steps, C, H, W]
+                assert image.ndim == 4, f"Expected 4 dimensions (num_obs_steps, C, H, W), got shape {image.shape}"
 
-            processed_images.append(image)
-        pixel_values = torch.stack(processed_images, dim=0) # [num_input_cameras, T, C, H, W]
-        
-        if self.num_output_cameras > pixel_values.shape[0]:
-            out = torch.zeros((self.num_output_cameras,) + pixel_values.shape[1:], device=pixel_values.device, dtype=pixel_values.dtype)
-            out[0: pixel_values.shape[0]] = pixel_values
-            sample["pixel_values"] = out
-        elif self.num_output_cameras < pixel_values.shape[0]:
-            logger.warning(f"num_output_cameras {self.num_output_cameras} is less than the number of cameras in data {pixel_values.shape[0]}, "
-                           f"truncating the input to the first {self.num_output_cameras} cameras.")
-            sample["pixel_values"] = pixel_values[:self.num_output_cameras]
-        else:
-            sample["pixel_values"] = pixel_values
+                # Apply transforms efficiently on the merged batch
+                transforms = self.train_transforms if self.is_train else self.val_transforms
+                current_transforms = transforms[key] if isinstance(transforms, dict) else transforms
+                for trans in current_transforms:
+                    image = trans(image)
+
+                meta_shape = [self.num_obs_steps] + shape
+                assert image.shape == meta_shape, \
+                    f"Expected shape {meta_shape}, got {image.shape} after transforms for key {key}"
+
+                processed_images.append(image)
+            pixel_values = torch.stack(processed_images, dim=0) # [num_input_cameras, T, C, H, W]
+
+            if self.num_output_cameras > pixel_values.shape[0]:
+                out = torch.zeros((self.num_output_cameras,) + pixel_values.shape[1:], device=pixel_values.device, dtype=pixel_values.dtype)
+                out[0: pixel_values.shape[0]] = pixel_values
+                sample["pixel_values"] = out
+            elif self.num_output_cameras < pixel_values.shape[0]:
+                logger.warning(f"num_output_cameras {self.num_output_cameras} is less than the number of cameras in data {pixel_values.shape[0]}, "
+                               f"truncating the input to the first {self.num_output_cameras} cameras.")
+                sample["pixel_values"] = pixel_values[:self.num_output_cameras]
+            else:
+                sample["pixel_values"] = pixel_values
 
         # Copy action before transform for open-loop evaluation, 
         # disabled for training dataset as it may cause collating key problem.

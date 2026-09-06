@@ -1,0 +1,74 @@
+{
+  "data_root": "/mnt/hwdata/cfy/FastWAM/data/libero_mujoco3.3.2",
+  "dataset_roots": null,
+  "suites": [
+    "libero_spatial",
+    "libero_object",
+    "libero_goal",
+    "libero_10"
+  ],
+  "base_vae": "/mnt/hwdata/cfy/FastWAM/checkpoints/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors",
+  "vae_variant": "wan2.2-ti2v-5b",
+  "norm_stats_path": "/mnt/hwdata/cfy/FastWAM/data/libero_mujoco3.3.2/libero_rothko_region_symmetric_q99p95_h16_224x448.pt",
+  "output_dir": "/mnt/hwdata/cfy/FastWAM/runs/libero_rothko_vae_decoder_all4_h16_bs2_ga8_lr1e-5_ep2_rerun_fixed",
+  "export_safetensors": null,
+
+  "action_horizon": 16,
+  "focal": 0.2,
+  "center_scale": 1.0,
+  "dir_scale": 1.0,
+  "center_frac": 0.5,
+  "boundary_margin": 8,
+  "outer_margin": 8,
+
+  "eval_episodes_per_task": 2,
+  "split_seed": 20260801,
+  "episode_cache_size": 64,
+
+  "batch_size": 2,
+  "grad_accum_steps": 8,
+  "epochs": 2,
+  "lr": 1e-5,
+  "weight_decay": 0.0,
+  "grad_clip": 1.0,
+  "zero_optimizer": true,
+
+  "center_loss_weight": 1.0,
+  "direction_loss_weight": 1.0,
+  "gripper_loss_weight": 1.0,
+
+  "lr_scheduler": "cosine",
+  "warmup_steps": null,
+  "warmup_ratio": 0.05,
+  "min_lr_ratio": 0.01,
+
+  "log_every": 10,
+  "eval_every": 250,
+  "eval_windows": 200,
+  "eval_sampling": "random",
+  "eval_windows_per_episode": null,
+  "eval_batch_size": 1,
+  "eval_seed": 12345,
+
+  "save_every": 400,
+  "export_every": 800,
+  "save_step_checkpoints": true,
+  "step_checkpoint_every": 800,
+
+  "device": "cuda:0",
+  "bf16": true,
+  "seed": 42,
+  "resume": "latest",
+  "allow_weights_only_resume": false,
+  "auto_resume": true,
+  "fresh": false,
+  "log_file": null,
+  "no_progress_bar": false,
+
+  "wandb": true,
+  "wandb_project": "fast-wam",
+  "wandb_entity": null,
+  "wandb_name": "libero_rothko_vae_decoder_all4_h16_bs2_ga8_lr1e-5_ep2_rerun_fixed",
+  "wandb_group": "libero_rothko_vae",
+  "wandb_mode": "online"
+}

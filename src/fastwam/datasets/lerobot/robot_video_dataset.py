@@ -17,6 +17,7 @@ from .utils.normalizer import save_dataset_stats_to_json, load_dataset_stats_fro
 from ..dataset_utils import ResizeSmallestSideAspectPreserving, CenterCrop, Normalize
 from ..robotwin_rgb import build_robotwin_rgb_canvas
 from ..libero_rgb import build_libero_rgb_canvas
+from ..latent_cache import LatentCacheReader, build_dataset_contract
 from fastwam.utils.logging_config import get_logger
 from fastwam.utils import misc, pytorch_utils
 from fastwam.representations.rothko import RothkoCodec, RothkoCodecConfig
@@ -29,6 +30,51 @@ logger = get_logger(__name__)
 
 
 DEFAULT_PROMPT = "A video recorded from a robot's point of view executing the following instruction: {task}"
+
+
+def resolve_libero_future_gripper(
+    raw_action: dict,
+    *,
+    action_horizon: int,
+    explicit_key: Optional[str] = None,
+) -> torch.Tensor:
+    """Return future LIBERO gripper targets in ``0=closed,1=open`` form.
+
+    Original LIBERO already stores that convention in the final dimension of
+    ``action``.  LIBERO-Plus keeps its environment command in ``action`` and
+    provides an explicit converted side channel.  Keeping the selection behind
+    an opt-in key preserves every existing LIBERO configuration exactly.
+    """
+    if explicit_key is None:
+        default_action = raw_action.get("default")
+        if default_action is None:
+            raise ValueError("Missing raw_action.default for LIBERO gripper targets.")
+        if default_action.ndim != 2 or default_action.shape[0] != action_horizon:
+            raise ValueError(
+                "Expected raw_action.default with shape "
+                f"[{action_horizon},D], got {tuple(default_action.shape)}."
+            )
+        return default_action[:, -1:].float().clamp(0, 1)
+
+    explicit_gripper = raw_action.get(explicit_key)
+    if explicit_gripper is None:
+        raise ValueError(
+            f"Missing raw_action.{explicit_key} configured as the explicit "
+            "LIBERO gripper target."
+        )
+    if explicit_gripper.shape != (action_horizon, 1):
+        raise ValueError(
+            f"Expected raw_action.{explicit_key} {(action_horizon, 1)}, "
+            f"got {tuple(explicit_gripper.shape)}."
+        )
+    explicit_gripper = explicit_gripper.float()
+    if not bool(torch.isfinite(explicit_gripper).all().item()):
+        raise ValueError(f"raw_action.{explicit_key} contains non-finite values.")
+    if bool(((explicit_gripper < 0.0) | (explicit_gripper > 1.0)).any().item()):
+        raise ValueError(
+            f"raw_action.{explicit_key} must use 0=closed,1=open in [0,1]."
+        )
+    return explicit_gripper
 
 class RobotVideoDataset(torch.utils.data.Dataset):
     def __init__(
@@ -56,10 +102,24 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         raw_action_meta=None,
         raw_state_meta=None,
         raymap_representation: Optional[str] = None,
+        libero_action_gripper_key: Optional[str] = None,
         rothko_norm_stats: Optional[str] = None,
         rothko_config=None,
         sample_error_mode: str = "fallback",
+        latent_cache_dir: Optional[str] = None,
+        latent_cache_only: bool = False,
     ):
+        dataset_dirs = [str(path) for path in dataset_dirs]
+        self.dataset_dirs = dataset_dirs
+        self.latent_cache_only = bool(latent_cache_only)
+        if self.latent_cache_only and latent_cache_dir in (None, "", "null"):
+            raise ValueError("`latent_cache_only=true` requires `latent_cache_dir`.")
+        self.sample_error_mode = str(sample_error_mode)
+        if self.sample_error_mode not in {"fallback", "raise"}:
+            raise ValueError(
+                "`sample_error_mode` must be 'fallback' or 'raise', got "
+                f"{self.sample_error_mode!r}."
+            )
         episode_indices = None
         if robotwin_task_names is not None:
             robotwin_task_names = [str(name) for name in robotwin_task_names]
@@ -117,8 +177,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             is_training_set=is_training_set,
             global_sample_stride=global_sample_stride,
             episode_indices=episode_indices,
-            raw_action_meta=raw_action_meta,
-            raw_state_meta=raw_state_meta,
+            raw_action_meta=None if self.latent_cache_only else raw_action_meta,
+            raw_state_meta=None if self.latent_cache_only else raw_state_meta,
+            sample_error_mode=self.sample_error_mode,
         )
     
         self.num_frames = num_frames
@@ -131,23 +192,38 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         self.video_sample_indices = list(range(0, num_frames, self.action_video_freq_ratio))
 
         self.camera_key = camera_key
-        self.lerobot_dataset._set_return_images(True)
+        self.lerobot_dataset._set_return_images(not self.latent_cache_only)
 
         self.video_size = video_size
         self.text_embedding_cache_dir = text_embedding_cache_dir
         self.context_len = context_len
         self._warned_legacy_text_cache = False
+        # LIBERO has only a small fixed instruction vocabulary. Avoid loading
+        # the same ~1 MiB context tensor from disk for every sampled window.
+        # DataLoader workers inherit/populate their own bounded-by-vocabulary
+        # copy; returned tensors are read-only from the dataset's perspective.
+        self._text_context_memory_cache = {}
         self.skip_padding_as_possible = skip_padding_as_possible
         self.max_padding_retry = max_padding_retry
         self.concat_multi_camera = concat_multi_camera
         self.override_instruction = override_instruction
-        self.sample_error_mode = str(sample_error_mode)
-        if self.sample_error_mode not in {"fallback", "raise"}:
-            raise ValueError(
-                "`sample_error_mode` must be 'fallback' or 'raise', got "
-                f"{self.sample_error_mode!r}."
-            )
+        self.latent_cache_dir = latent_cache_dir
+        self.latent_cache = None
+        self.latent_cache_metadata = None
         self.raymap_representation = raymap_representation
+        self.libero_action_gripper_key = (
+            None
+            if libero_action_gripper_key in (None, "", "null")
+            else str(libero_action_gripper_key)
+        )
+        if (
+            self.libero_action_gripper_key is not None
+            and raymap_representation != "libero_rothko"
+        ):
+            raise ValueError(
+                "`libero_action_gripper_key` is only valid with "
+                "`raymap_representation=libero_rothko`."
+            )
         self.raymap_codec = None
         if raymap_representation is not None:
             if raymap_representation not in ("rothko", "libero_rothko"):
@@ -210,6 +286,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         if processor is not None:
             if isinstance(processor, DictConfig):
                 processor = instantiate(processor)
+            if self.latent_cache_only:
+                processor.set_process_images(False)
             if not pretrained_norm_stats:
                 if not is_training_set:
                     raise ValueError("pretrained_norm_stats must be provided for validation/test sets since we don't want to calculate stats on them.")
@@ -233,6 +311,42 @@ class RobotVideoDataset(torch.utils.data.Dataset):
 
             processor.set_normalizer_from_stats(dataset_stats)
             self.lerobot_dataset.set_processor(processor)
+
+        norm_stats = (
+            None
+            if self.raymap_codec is None
+            else getattr(self.raymap_codec, "norm_stats", None)
+        )
+        self.latent_cache_dataset_contract = build_dataset_contract(
+            dataset_dirs=self.dataset_dirs,
+            dataset_length=len(self.lerobot_dataset),
+            num_frames=self.num_frames,
+            video_size=list(self.video_size),
+            raymap_representation=self.raymap_representation,
+            raymap_codec_metadata=(
+                None if self.raymap_codec is None else self.raymap_codec.metadata()
+            ),
+            norm_stats_sha256=(
+                None if norm_stats is None else norm_stats.fingerprint()
+            ),
+        )
+        if latent_cache_dir not in (None, "", "null"):
+            self.latent_cache = LatentCacheReader(
+                latent_cache_dir,
+                expected_dataset_contract=self.latent_cache_dataset_contract,
+            )
+            if len(self.latent_cache) != len(self.lerobot_dataset):
+                raise ValueError(
+                    "Latent cache length mismatch: "
+                    f"cache={len(self.latent_cache)}, "
+                    f"dataset={len(self.lerobot_dataset)}."
+                )
+            self.latent_cache_metadata = self.latent_cache.metadata
+            logger.info(
+                "Using precomputed RGB/Rothko latent cache: %s (%d samples)",
+                self.latent_cache.cache_dir,
+                len(self.latent_cache),
+            )
         
     def __len__(self):
         return len(self.lerobot_dataset)
@@ -242,6 +356,10 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         sample = None
         for attempt in range(self.max_padding_retry + 1):
             sample = self.lerobot_dataset[sample_idx]
+            # BaseLerobotDataset may replace an unreadable sample in fallback
+            # mode. Keep every downstream side channel and latent-cache lookup
+            # aligned to the sample that was actually returned.
+            sample_idx = int(sample.get("idx", sample_idx))
 
             if not self.skip_padding_as_possible:
                 break
@@ -261,6 +379,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 break
 
             sample_idx = np.random.randint(len(self.lerobot_dataset))
+
+        if self.latent_cache_only:
+            return self._get_latent_cache_only(sample_idx, sample)
         
         image_is_pad = sample["image_is_pad"]
 
@@ -371,6 +492,10 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                     "raw_state.ee_pose_wxyz": raw_state.get("ee_pose_wxyz"),
                     "raw_state.gripper_open": raw_state.get("gripper_open"),
                 }
+                if self.libero_action_gripper_key is not None:
+                    required_raw[
+                        f"raw_action.{self.libero_action_gripper_key}"
+                    ] = raw_action.get(self.libero_action_gripper_key)
             missing = [name for name, value in required_raw.items() if value is None]
             if missing:
                 raise ValueError(
@@ -400,7 +525,6 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 action_target = raw_action["osc_target_pose_wxyz"].float()
                 state_pose = raw_state["ee_pose_wxyz"].float()
                 state_gripper = raw_state["gripper_open"].float()
-                raw_action_default = raw_action["default"].float()
                 if action_target.shape != (self.num_frames - 1, 7):
                     raise ValueError(
                         "Expected LIBERO OSC target "
@@ -419,7 +543,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 current_endpose = state_pose[0]
                 future_endpose = action_target
                 current_gripper = state_gripper[0]
-                future_gripper = raw_action_default[:, -1:].clamp(0, 1)
+                future_gripper = resolve_libero_future_gripper(
+                    raw_action,
+                    action_horizon=self.num_frames - 1,
+                    explicit_key=self.libero_action_gripper_key,
+                )
 
             pose_sequence = torch.cat(
                 (current_endpose.unsqueeze(0), future_endpose), dim=0
@@ -459,7 +587,49 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                     "future_gripper": future_gripper,
                 }
             )
+        if self.latent_cache is not None:
+            rgb_latents, raymap_latents = self.latent_cache[sample_idx]
+            data.update(
+                {
+                    "rgb_latents": rgb_latents,
+                    "raymap_latents": raymap_latents,
+                    "latent_cache_index": sample_idx,
+                }
+            )
         return data
+
+    def _get_latent_cache_only(self, sample_idx: int, sample: dict):
+        if self.latent_cache is None:
+            raise RuntimeError("Latent-cache-only dataset has no initialized cache.")
+        task = sample["instruction"]
+        if self.override_instruction is not None:
+            task = self.override_instruction
+        instruction = DEFAULT_PROMPT.format(task=task)
+        context, context_mask = self._get_cached_text_context(instruction)
+        context[~context_mask] = 0.0
+        context_mask = torch.ones_like(context_mask)
+
+        image_is_pad = sample["image_is_pad"][self.video_sample_indices].bool()
+        action_is_pad = sample["action_is_pad"].bool()
+        proprio_is_pad = sample["proprio_is_pad"].bool()
+        raymap_is_pad = torch.cat(
+            (proprio_is_pad[:1], action_is_pad), dim=0
+        )
+        rgb_latents, raymap_latents = self.latent_cache[sample_idx]
+        return {
+            "action": sample["action"],
+            "proprio": sample["proprio"][:-1],
+            "prompt": instruction,
+            "context": context,
+            "context_mask": context_mask,
+            "image_is_pad": image_is_pad,
+            "action_is_pad": action_is_pad,
+            "proprio_is_pad": proprio_is_pad,
+            "raymap_is_pad": raymap_is_pad,
+            "rgb_latents": rgb_latents,
+            "raymap_latents": raymap_latents,
+            "latent_cache_index": sample_idx,
+        }
 
     def _get_cached_text_context(self, prompt: str):
         if self.text_embedding_cache_dir is None:
@@ -468,6 +638,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         os.makedirs(cache_dir, exist_ok=True)
         hashed = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         cache_path = os.path.join(cache_dir, f"{hashed}.t5_len{self.context_len}.wan22ti2v5b.pt")
+        memory_cached = self._text_context_memory_cache.get(cache_path)
+        if memory_cached is not None:
+            return memory_cached
         if not os.path.exists(cache_path):
             raise FileNotFoundError(
                 f"Missing text embedding cache: {cache_path}. "
@@ -515,6 +688,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 f"Cached mask_len mismatch: expected {self.context_len}, got {context_mask.shape[0]} in {cache_path}"
             )
 
+        self._text_context_memory_cache[cache_path] = (context, context_mask)
         return context, context_mask
 
     def __getitem__(self, idx):
