@@ -124,6 +124,10 @@ def main(usr_args):
     args['task_name'] = task_name
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
+    if usr_args.get("eval_step_limit") is not None:
+        args["eval_step_limit"] = int(usr_args["eval_step_limit"])
+        if args["eval_step_limit"] <= 0:
+            raise ValueError("eval_step_limit must be positive")
 
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
@@ -207,6 +211,32 @@ def main(usr_args):
     test_num = eval_num_episodes
     topk = 1
 
+    # Only opted-in evaluations read/write progress; legacy execution is unchanged.
+    resume_state = None
+    resume_file = None
+    if parse_bool(usr_args.get("resume", False)) or parse_bool(usr_args.get("resume_tracking", False)):
+        from eval_resume import identity, progress_path, load_progress, atomic_save, archive_uncommitted
+        phase = _result_suffix_from_task_config(task_config)
+        resume_file = progress_path(save_dir, phase)
+        resume_identity = identity(usr_args)
+        if parse_bool(usr_args.get("resume", False)):
+            resume_state = load_progress(resume_file, resume_identity, test_num, st_seed)
+            archive_uncommitted(save_dir, phase, resume_state["completed"])
+        else:
+            if resume_file.exists() or any(save_dir.glob("episode*.mp4")):
+                raise FileExistsError("Fresh tracked evaluation requires a new output directory")
+            resume_state = dict(version=1, identity=resume_identity, completed=0,
+                                successes=0, next_seed=st_seed)
+            atomic_save(resume_file, resume_state)
+        print(f"Resume progress: {resume_state['successes']}/{resume_state['completed']}, "
+              f"next seed={resume_state['next_seed']}, target={test_num}", flush=True)
+        if resume_state["completed"] == test_num:
+            result_suffix = _result_suffix_from_task_config(task_config)
+            with open(save_dir / f"_result_{result_suffix}.txt", "w") as file:
+                file.write(f"Timestamp: {eval_ts}\n\nInstruction Type: {instruction_type}\n\n"
+                           f"{resume_state['successes'] / test_num}")
+            print("Already complete; skipping model load and rollout.", flush=True)
+            return
     model = get_model(usr_args)
     st_seed, suc_num = eval_policy(task_name,
                                    TASK_ENV,
@@ -216,6 +246,8 @@ def main(usr_args):
                                    test_num=test_num,
                                    video_size=video_size,
                                    instruction_type=instruction_type,
+                                   resume_state=resume_state,
+                                   resume_file=resume_file,
                                    skip_get_obs_within_replan=skip_get_obs_within_replan)
     suc_nums.append(suc_num)
 
@@ -241,6 +273,8 @@ def eval_policy(task_name,
                 test_num=100,
                 video_size=None,
                 instruction_type=None,
+                resume_state=None,
+                resume_file=None,
                 skip_get_obs_within_replan=False):
     print(f"\033[34mTask Name: {args['task_name']}\033[0m")
     print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
@@ -258,6 +292,13 @@ def eval_policy(task_name,
     reset_func = eval_function_decorator(policy_name, "reset_model")
 
     now_seed = st_seed
+    if resume_state is not None:
+        TASK_ENV.suc = resume_state["successes"]
+        TASK_ENV.test_num = resume_state["completed"]
+        now_id = succ_seed = resume_state["completed"]
+        now_seed = resume_state["next_seed"]
+        if hasattr(model, "episode_count"):
+            model.episode_count = resume_state["completed"]
     task_total_reward = 0
     clear_cache_freq = args["clear_cache_freq"]
 
@@ -407,6 +448,12 @@ def eval_policy(task_name,
         )
         # TASK_ENV._take_picture()
         now_seed += 1
+
+        if resume_state is not None:
+            from eval_resume import atomic_save
+            resume_state.update(completed=TASK_ENV.test_num,
+                                successes=TASK_ENV.suc, next_seed=now_seed)
+            atomic_save(resume_file, resume_state)
 
     return now_seed, TASK_ENV.suc
 

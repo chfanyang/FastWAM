@@ -30,6 +30,8 @@ Examples:
 """
 
 import os
+import hashlib
+import json
 import subprocess
 import sys
 from datetime import datetime
@@ -211,6 +213,16 @@ def main(cfg: DictConfig):
     _append_override(overrides, "policy_name", cfg.EVALUATION.policy_name)
     _append_override(overrides, "instruction_type", cfg.EVALUATION.instruction_type)
     _append_override(overrides, "eval_num_episodes", cfg.EVALUATION.eval_num_episodes)
+    _append_override(overrides, "resume", cfg.EVALUATION.get("resume", False))
+    _append_override(overrides, "resume_tracking", cfg.EVALUATION.get("resume_tracking", False))
+    if cfg.EVALUATION.get("resume", False) or cfg.EVALUATION.get("resume_tracking", False):
+        resume_config = {
+            "model": OmegaConf.to_container(cfg.model, resolve=True),
+            "processor": OmegaConf.to_container(cfg.data.train.processor, resolve=True),
+        }
+        fingerprint = hashlib.sha256(json.dumps(resume_config, sort_keys=True).encode()).hexdigest()
+        _append_override(overrides, "resume_config_fingerprint", fingerprint)
+    _append_override(overrides, "eval_step_limit", cfg.EVALUATION.get("eval_step_limit"))
 
     _append_override(overrides, "sim_cfg_path", str(sim_cfg_path))
     _append_override(overrides, "sim_task", sim_task)

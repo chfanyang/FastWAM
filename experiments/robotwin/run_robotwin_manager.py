@@ -250,6 +250,9 @@ def main(cfg: DictConfig):
     summary_json = run_output_dir / "summary.json"
 
     tasks = _resolve_tasks(cfg)
+    phases = list(cfg.EVALUATION.get("phases", ["clean", "random"]))
+    if not phases or len(set(phases)) != len(phases) or any(p not in {"clean", "random"} for p in phases):
+        raise ValueError("EVALUATION.phases must contain unique clean/random entries.")
 
     extra_overrides = _collect_worker_overrides()
 
@@ -283,6 +286,11 @@ def main(cfg: DictConfig):
             f"EVALUATION.task_config={task_config}",
             f"EVALUATION.output_dir={str(output_dir)}",
         ]
+        # Preserve opt-in phase configuration defaults in the single worker,
+        # whose Hydra entry point otherwise loads sim_robotwin.yaml.
+        if phases == ["random"]:
+            for key in ("replan_steps", "num_inference_steps", "eval_num_episodes", "instruction_type"):
+                cmd.append(f"EVALUATION.{key}={cfg.EVALUATION[key]}")
         cmd.extend(extra_overrides)
         return cmd
 
@@ -334,7 +342,7 @@ def main(cfg: DictConfig):
     def try_launch_pending(gpu_id: str) -> None:
         while len(pending_tasks) > 0 and gpu_running_count(gpu_id) < max_tasks_per_gpu:
             task_name = pending_tasks.popleft()
-            running_states.append(launch_phase(task_name=task_name, gpu_id=gpu_id, phase="clean"))
+            running_states.append(launch_phase(task_name=task_name, gpu_id=gpu_id, phase=phases[0]))
 
     def write_outputs() -> None:
         clean_mean = _mean_or_none([task_rates[t]["clean"] for t in tasks])
@@ -450,11 +458,12 @@ def main(cfg: DictConfig):
                 f"success_rate={success_rate:.4f}"
             )
 
-            if state.phase == "clean":
+            next_phase_index = phases.index(state.phase) + 1
+            if next_phase_index < len(phases):
                 running_states.append(launch_phase(
                     task_name=state.task_name,
                     gpu_id=gpu_id,
-                    phase="random",
+                    phase=phases[next_phase_index],
                 ))
                 continue
 

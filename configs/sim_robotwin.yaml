@@ -13,6 +13,9 @@ model:
   skip_dit_load_from_pretrain: true
 
 EVALUATION:
+  resume: false
+  resume_tracking: false
+  phases: [clean, random]
   robotwin_root: third_party/RoboTwin
   policy_name: fastwam_policy
   task_name: null

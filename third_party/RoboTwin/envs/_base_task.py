@@ -169,6 +169,8 @@ class Base_Task(gym.Env):
                 except:
                     print(f"{self.task_name} not in step limit file, set to 1000")
                     self.step_lim = 1000
+            if kwags.get("eval_step_limit") is not None:
+                self.step_lim = int(kwags["eval_step_limit"])
 
         # info
         self.info = dict()

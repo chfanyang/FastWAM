@@ -1,0 +1,13 @@
+defaults:
+  - sim_robotwin
+  - override /task: robotwin_c2r_rothko_centerfrac05_full_wan22_5b_1e-4
+  - _self_
+model:
+  load_text_encoder: true
+  skip_dit_load_from_pretrain: true
+EVALUATION:
+  phases: [random]
+  task_config: demo_randomized
+  eval_num_episodes: 100
+  replan_steps: 8
+  num_inference_steps: 20
