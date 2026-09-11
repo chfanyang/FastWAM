@@ -1,9 +1,11 @@
 import unittest
+from dataclasses import replace
 
 import torch
 
 from fastwam.models.wan22.fastwam_visual_action import FastWAMVideoOnlyRaymap
 from fastwam.representations.rothko import RothkoNormStats
+from fastwam.representations.libero_rothko import LiberoRothkoCodec
 
 
 class _DummyVideoExpert(torch.nn.Module):
@@ -34,6 +36,29 @@ def _stats(height: int, width: int, metadata: dict) -> RothkoNormStats:
 
 
 class VisualActionRepresentationMetadataTest(unittest.TestCase):
+    def test_absolute_ray0_checkpoint_contract(self):
+        relative = self._model("libero_rothko")
+        absolute = self._model("libero_rothko")
+        codec = absolute.raymap_codec
+        absolute.raymap_codec = LiberoRothkoCodec(
+            replace(codec.config, frame0_pose_mode="absolute",
+                    absolute_position_min=(-1., -1., 0.),
+                    absolute_position_max=(1., 1., 2.)), codec.norm_stats)
+        old = relative._visual_action_checkpoint_config()
+        new = absolute._visual_action_checkpoint_config()
+        absolute._validate_visual_action_checkpoint_config(new, checkpoint_path="new.pt")
+        relative._validate_visual_action_checkpoint_config(old, checkpoint_path="old.pt")
+        for model, config in ((relative, new), (absolute, old)):
+            with self.assertRaisesRegex(ValueError, "frame0_pose_mode mismatch"):
+                model._validate_visual_action_checkpoint_config(config, checkpoint_path="mismatch.pt")
+        for key in ("absolute_position_min", "absolute_position_max"):
+            missing = dict(new); missing.pop(key)
+            with self.assertRaisesRegex(ValueError, "checkpoint missing"):
+                absolute._validate_visual_action_checkpoint_config(missing, checkpoint_path="missing.pt")
+        changed = dict(new); changed["absolute_position_min"] = [-2., -1., 0.]
+        with self.assertRaisesRegex(ValueError, "codec mismatch"):
+            absolute._validate_visual_action_checkpoint_config(changed, checkpoint_path="bounds.pt")
+
     def _model(
         self,
         representation: str,

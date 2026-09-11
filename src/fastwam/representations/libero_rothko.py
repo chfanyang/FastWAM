@@ -14,6 +14,10 @@ from typing import Any
 import torch
 
 from .rothko import (
+    ROTHKO_DECODE_MODE_BLOCK_POSITION_JOINT_ROTATION,
+    ROTHKO_DECODE_MODE_ROBUST_BLOCK_WEIGHTED_JOINT,
+    _decode_pose_tiles_robust_block_weighted_joint,
+    _decode_pose_tiles_block_position_joint_rotation,
     ROTHKO_DECODE_MODE_LEGACY,
     ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS,
     ROTHKO_DECODE_MODE_ROBUST_JOINT,
@@ -45,8 +49,22 @@ class LiberoRothkoCodecConfig:
     boundary_margin: int = 8
     outer_margin: int = 8
     duplicate_horizontal: bool = True
+    # Opt-in: only frame zero carries world-frame pose. Future frames retain
+    # the original chunk-local representation and normalization.
+    frame0_pose_mode: str = "relative"
+    absolute_position_min: tuple[float, float, float] | None = None
+    absolute_position_max: tuple[float, float, float] | None = None
 
     def validate(self) -> None:
+        if self.frame0_pose_mode not in {"relative", "absolute"}:
+            raise ValueError("frame0_pose_mode must be relative or absolute")
+        if self.frame0_pose_mode == "absolute":
+            lo, hi = self.absolute_position_min, self.absolute_position_max
+            if lo is None or hi is None or len(lo) != 3 or len(hi) != 3:
+                raise ValueError("Absolute RAY0 requires three-axis position bounds")
+            bounds = torch.tensor([lo, hi], dtype=torch.float64)
+            if not torch.isfinite(bounds).all() or not (bounds[1] > bounds[0]).all():
+                raise ValueError("Absolute RAY0 position bounds must be finite and ordered")
         expected_width = (
             2 * self.tile_width if self.duplicate_horizontal else self.tile_width
         )
@@ -91,6 +109,10 @@ class LiberoRothkoCodec:
             decode_anchor_alpha
         )
         self.decode_block_grid = _validate_decode_block_grid(decode_block_grid)
+        if self.config.frame0_pose_mode == "absolute" and (
+            self.decode_mode != ROTHKO_DECODE_MODE_LEGACY or self.decode_anchor_alpha != 0
+        ):
+            raise ValueError("Absolute RAY0 currently requires legacy decoding and anchor_alpha=0")
         self._decode_anchor_raw: torch.Tensor | None = None
         self.expected_action_horizon = (
             None if expected_action_horizon is None else int(expected_action_horizon)
@@ -131,6 +153,14 @@ class LiberoRothkoCodec:
         self._decode_anchor_raw = self.denormalize(normalized).detach()
 
     def metadata(self) -> dict[str, Any]:
+        config_metadata = asdict(self.config)
+        # Preserve old metadata/cache fingerprints exactly for legacy configs.
+        if self.config.frame0_pose_mode == "relative":
+            for key in ("frame0_pose_mode", "absolute_position_min", "absolute_position_max"):
+                config_metadata.pop(key)
+        else:
+            config_metadata["absolute_position_min"] = list(self.config.absolute_position_min)
+            config_metadata["absolute_position_max"] = list(self.config.absolute_position_max)
         return {
             "environment": self.environment,
             "representation": "rothko",
@@ -139,7 +169,7 @@ class LiberoRothkoCodec:
             "pose_dim": self.pose_dim,
             "gripper_dim": self.gripper_dim,
             "num_arms": self.num_arms,
-            **asdict(self.config),
+            **config_metadata,
             "gripper_encoding": "normalized_outer_border_2g_minus_1",
             "quaternion_order": "wxyz",
         }
@@ -245,6 +275,11 @@ class LiberoRothkoCodec:
         output[..., center] = (
             relative_position * cfg.center_scale
         )[..., :, None]
+        if cfg.frame0_pose_mode == "absolute":
+            output[:, 0] = torch.einsum(
+                "bij,hwj->bihw", rotation[:, 0], canonical
+            ) * cfg.dir_scale
+            output[:, 0, :, center] = (position[:, 0] * cfg.center_scale)[..., None]
         return output
 
     def encode_raw(self, pose7: torch.Tensor) -> torch.Tensor:
@@ -302,7 +337,26 @@ class LiberoRothkoCodec:
             / (hi - lo).clamp_min(1e-6).unsqueeze(1)
             - 1.0
         ).clamp(-1.0, 1.0)
+        if self.config.frame0_pose_mode == "absolute":
+            abs_lo, abs_hi = self._absolute_frame_bounds(raw)
+            normalized[:, 0] = (
+                2 * (raw[:, 0] - abs_lo) / (abs_hi - abs_lo) - 1
+            ).clamp(-1, 1)
         return normalized.squeeze(0) if squeeze else normalized
+
+    def _absolute_frame_bounds(self, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        cfg = self.config
+        lo = tensor.new_full((1, 3, cfg.tile_height, cfg.tile_width), -cfg.dir_scale)
+        hi = torch.full_like(lo, cfg.dir_scale)
+        center, _, _ = _center_and_read_masks(
+            cfg.tile_height, cfg.tile_width, center_frac=cfg.center_frac,
+            boundary_margin=0, outer_margin=0, device=tensor.device,
+        )
+        lo[..., center] = tensor.new_tensor(cfg.absolute_position_min)[None, :, None] * cfg.center_scale
+        hi[..., center] = tensor.new_tensor(cfg.absolute_position_max)[None, :, None] * cfg.center_scale
+        if cfg.duplicate_horizontal:
+            lo, hi = torch.cat((lo, lo), -1), torch.cat((hi, hi), -1)
+        return lo, hi
 
     def denormalize(self, normalized: torch.Tensor) -> torch.Tensor:
         squeeze = normalized.ndim == 4
@@ -314,6 +368,9 @@ class LiberoRothkoCodec:
             )
         lo, hi = self._expanded_stats(device=normalized.device, dtype=normalized.dtype)
         raw = (normalized + 1.0) * 0.5 * (hi - lo).unsqueeze(1) + lo.unsqueeze(1)
+        if self.config.frame0_pose_mode == "absolute":
+            abs_lo, abs_hi = self._absolute_frame_bounds(normalized)
+            raw[:, 0] = (normalized[:, 0] + 1) * 0.5 * (abs_hi - abs_lo) + abs_lo
         return raw.squeeze(0) if squeeze else raw
 
     def write_gripper(
@@ -467,6 +524,19 @@ class LiberoRothkoCodec:
         normalized = video.permute(0, 2, 1, 3, 4).contiguous()
         gripper = self.read_gripper(normalized)
         raw = self.denormalize(normalized)
+        if self.config.frame0_pose_mode == "absolute":
+            # Future maps still express local displacements/rotations. Use the
+            # ideal 0/I reference, NOT the absolute pose in decoded RAY0.
+            cfg = self.config
+            reference = self._canonical_directions(raw.device, raw.dtype).permute(2, 0, 1) * cfg.dir_scale
+            center, _, _ = _center_and_read_masks(
+                cfg.tile_height, cfg.tile_width, center_frac=cfg.center_frac,
+                boundary_margin=0, outer_margin=0, device=raw.device,
+            )
+            reference[:, center] = 0
+            if cfg.duplicate_horizontal:
+                reference = torch.cat((reference, reference), -1)
+            raw[:, 0] = reference
         left = raw[..., : self.config.tile_width]
         if (
             self.decode_mode == ROTHKO_DECODE_MODE_LEGACY
@@ -499,6 +569,8 @@ class LiberoRothkoCodec:
                 )
             cfg = self.config
             decoder = {
+                ROTHKO_DECODE_MODE_BLOCK_POSITION_JOINT_ROTATION: _decode_pose_tiles_block_position_joint_rotation,
+                ROTHKO_DECODE_MODE_ROBUST_BLOCK_WEIGHTED_JOINT: _decode_pose_tiles_robust_block_weighted_joint,
                 ROTHKO_DECODE_MODE_ROBUST_JOINT: _decode_pose_tiles_robust_joint,
                 ROTHKO_DECODE_MODE_ROBUST_TILEWISE: _decode_pose_tiles_robust_tilewise,
                 ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS: (
@@ -530,7 +602,7 @@ class LiberoRothkoCodec:
                 decoder_kwargs["anchor_tiles"] = torch.stack(
                     anchor_tiles, dim=2
                 )
-            if self.decode_mode == ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS:
+            if self.decode_mode in (ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS, ROTHKO_DECODE_MODE_BLOCK_POSITION_JOINT_ROTATION, ROTHKO_DECODE_MODE_ROBUST_BLOCK_WEIGHTED_JOINT):
                 decoder_kwargs["block_grid"] = self.decode_block_grid
             pose = decoder(
                 torch.stack(tiles, dim=2),

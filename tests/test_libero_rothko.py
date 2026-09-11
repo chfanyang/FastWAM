@@ -57,6 +57,39 @@ class LiberoRothkoCodecTest(unittest.TestCase):
         gripper = (torch.arange(time) % 2).float().unsqueeze(-1)
         return pose, gripper
 
+    def test_hybrid_matches_component_solvers_on_noisy_video(self) -> None:
+        pose, gripper = self._trajectory()
+        video = self._codec().encode(pose, gripper)
+        noise = torch.randn(video.shape, generator=torch.Generator().manual_seed(42))
+        video = (video + noise * 0.015).clamp(-1, 1)
+        for grid in (2, 4):
+            hybrid, hg = self._codec("block_position_joint_rotation", decode_block_grid=grid).decode(video, pose[0])
+            block, bg = self._codec("robust_block_consensus", decode_block_grid=grid).decode(video, pose[0])
+            joint, jg = self._codec("robust_joint").decode(video, pose[0])
+            torch.testing.assert_close(hybrid[:, :3], block[:, :3], atol=0, rtol=0)
+            torch.testing.assert_close(hybrid[:, 3:], joint[:, 3:], atol=0, rtol=0)
+            torch.testing.assert_close(hg, bg, atol=0, rtol=0)
+            torch.testing.assert_close(hg, jg, atol=0, rtol=0)
+
+    def test_block_weighted_joint_roundtrip_and_corruption(self) -> None:
+        pose, gripper = self._trajectory()
+        video = self._codec().encode(pose, gripper)
+        for grid in (2, 4):
+            codec = self._codec('robust_block_weighted_joint', decode_block_grid=grid)
+            decoded, grip = codec.decode(video, pose[0])
+            torch.testing.assert_close(decoded, pose, atol=2e-5, rtol=0)
+            torch.testing.assert_close(grip, gripper, atol=1e-6, rtol=0)
+            damaged = video.clone()
+            damaged[:, 1:, 64:110, 64:110] += 0.5
+            damaged[:, 1:, 8:50, 8:50] *= -1
+            decoded, _ = codec.decode(damaged, pose[0])
+            self.assertTrue(torch.isfinite(decoded).all())
+            self.assertLess((decoded[:, :3] - pose[:, :3]).norm(dim=-1).max().item(), 0.002)
+            torch.testing.assert_close(decoded[0], pose[0], atol=1e-6, rtol=0)
+            torch.testing.assert_close(decoded[:, 3:].norm(dim=-1), torch.ones(17), atol=1e-6, rtol=0)
+        with self.assertRaisesRegex(ValueError, 'requires anchor_alpha=0'):
+            self._codec('robust_block_weighted_joint', decode_anchor_alpha=.5).decode(video, pose[0])
+
     def test_geometry_and_gripper_roundtrip(self) -> None:
         codec = self._codec()
         pose, gripper = self._trajectory()
@@ -91,7 +124,7 @@ class LiberoRothkoCodecTest(unittest.TestCase):
         zero_anchor = self._codec().encode(
             zero_pose, torch.full_like(gripper, 0.5)
         ).unsqueeze(0)
-        for mode in ("robust_tilewise", "robust_block_consensus"):
+        for mode in ("robust_tilewise", "robust_block_consensus", "block_position_joint_rotation"):
             for anchor_alpha in (0.0, 0.5, 1.0):
                 with self.subTest(mode=mode, anchor_alpha=anchor_alpha):
                     codec = self._codec(

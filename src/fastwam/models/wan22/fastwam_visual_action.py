@@ -1660,11 +1660,18 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             )
 
         expected_codec_metadata = self.raymap_codec.metadata()
+        # Old checkpoints unambiguously use relative frame zero. Never allow
+        # the new absolute conditioning to be silently enabled on old weights
+        # (or an absolute checkpoint to be deployed with the legacy codec).
+        if visual_config.get("frame0_pose_mode", "relative") != expected_codec_metadata.get("frame0_pose_mode", "relative"):
+            raise ValueError("Checkpoint Rothko frame0_pose_mode mismatch")
         missing_codec_keys: list[str] = []
         for key, expected in expected_codec_metadata.items():
             if key == "raymap_representation":
                 continue
             if key not in visual_config:
+                if key in {"absolute_position_min", "absolute_position_max"}:
+                    raise ValueError(f"Absolute RAY0 checkpoint missing {key}")
                 missing_codec_keys.append(key)
                 continue
             actual = visual_config[key]

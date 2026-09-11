@@ -26,11 +26,15 @@ ROTHKO_DECODE_MODE_LEGACY = "legacy"
 ROTHKO_DECODE_MODE_ROBUST_JOINT = "robust_joint"
 ROTHKO_DECODE_MODE_ROBUST_TILEWISE = "robust_tilewise"
 ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS = "robust_block_consensus"
+ROTHKO_DECODE_MODE_BLOCK_POSITION_JOINT_ROTATION = "block_position_joint_rotation"
+ROTHKO_DECODE_MODE_ROBUST_BLOCK_WEIGHTED_JOINT = "robust_block_weighted_joint"
 SUPPORTED_ROTHKO_DECODE_MODES = {
     ROTHKO_DECODE_MODE_LEGACY,
     ROTHKO_DECODE_MODE_ROBUST_JOINT,
     ROTHKO_DECODE_MODE_ROBUST_TILEWISE,
     ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS,
+    ROTHKO_DECODE_MODE_BLOCK_POSITION_JOINT_ROTATION,
+    ROTHKO_DECODE_MODE_ROBUST_BLOCK_WEIGHTED_JOINT,
 }
 
 
@@ -262,6 +266,7 @@ def _huber_location(
     sample_dim: int,
     num_iterations: int = 2,
     tuning: float = 1.5,
+    prior_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return a component-wise robust location without rejecting any sample."""
     estimate = _midpoint_median(values, dim=sample_dim)
@@ -274,6 +279,8 @@ def _huber_location(
             delta.unsqueeze(sample_dim) / residual.abs().clamp_min(eps),
             max=1.0,
         )
+        if prior_weights is not None:
+            weights = weights * prior_weights
         estimate = (weights * values).sum(dim=sample_dim) / weights.sum(
             dim=sample_dim
         ).clamp_min(eps)
@@ -305,6 +312,7 @@ def _robust_relative_rotation(
     *,
     num_iterations: int = 2,
     tuning: float = 1.5,
+    prior_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Joint iteratively reweighted Kabsch fit over all duplicate-tile rays."""
     eps = torch.finfo(direction.dtype).eps
@@ -313,6 +321,8 @@ def _robust_relative_rotation(
     weights = torch.ones(
         direction.shape[:-1], dtype=direction.dtype, device=direction.device
     )
+    if prior_weights is not None:
+        weights = weights * prior_weights
     rotation = None
     for iteration in range(num_iterations + 1):
         correlation = torch.einsum(
@@ -330,6 +340,8 @@ def _robust_relative_rotation(
         mad = _midpoint_median((residual - median).abs(), dim=-1).unsqueeze(-1)
         delta = (median + float(tuning) * 1.4826 * mad).clamp_min(1e-6)
         weights = torch.clamp(delta / residual.clamp_min(eps), max=1.0)
+        if prior_weights is not None:
+            weights = weights * prior_weights
     assert rotation is not None
     return rotation
 
@@ -678,6 +690,101 @@ def _decode_pose_tiles_robust_block_consensus(
         base_pose7,
         output_dtype=tiles.dtype,
     )
+
+
+def _decode_pose_tiles_robust_block_weighted_joint(
+    tiles: torch.Tensor, base_pose7: torch.Tensor, *, center_frac: float,
+    boundary_margin: int, outer_margin: int, center_scale: float,
+    canonical_directions: torch.Tensor, anchor_alpha: float = 0.0,
+    block_grid: int = 4, anchor_tiles: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Experimental spatial reliability priors followed by global robust fits.
+
+    Translation scores combine within-block scatter and disagreement of block
+    displacements. Rotation scores use residuals to a global pilot rotation,
+    with a conservative ray-observability factor. Scores only downweight blocks
+    above median + 1.5*MAD; priors have a 0.05 floor. No ground truth is used.
+    The initial version deliberately supports predicted-frame-zero anchoring only.
+    """
+    if anchor_alpha != 0:
+        raise ValueError("robust_block_weighted_joint currently requires anchor_alpha=0")
+    batch, time, copies, _, height, width = tiles.shape
+    _, origin, direction = _center_and_read_masks(
+        height, width, center_frac=center_frac, boundary_margin=boundary_margin,
+        outer_margin=outer_margin, device=tiles.device)
+    values = tiles.permute(0, 1, 2, 4, 5, 3).double()
+    positions, rays = [], []
+    for k in range(copies):
+        for y in range(block_grid):
+            y0, y1 = round(y * height / block_grid), round((y + 1) * height / block_grid)
+            for x in range(block_grid):
+                x0, x1 = round(x * width / block_grid), round((x + 1) * width / block_grid)
+                patch = values[:, :, k, y0:y1, x0:x1]
+                pm, rm = origin[y0:y1, x0:x1], direction[y0:y1, x0:x1]
+                if int(pm.sum()) >= 4:
+                    positions.append(patch[..., pm, :])
+                if int(rm.sum()) >= 8:
+                    rays.append(torch.nn.functional.normalize(patch[..., rm, :], dim=-1))
+    if len(positions) < 2 or len(rays) < 2:
+        return _decode_pose_tiles_robust_joint(
+            tiles, base_pose7, center_frac=center_frac, boundary_margin=boundary_margin,
+            outer_margin=outer_margin, center_scale=center_scale,
+            canonical_directions=canonical_directions, anchor_alpha=0)
+
+    def reliability(scores):
+        median = _midpoint_median(scores, dim=-1).unsqueeze(-1)
+        mad = _midpoint_median((scores - median).abs(), dim=-1).unsqueeze(-1)
+        cutoff = (median + 1.5 * 1.4826 * mad).clamp_min(1e-6)
+        return (cutoff / scores.clamp_min(1e-9)).clamp(0.05, 1.0)
+
+    centers = torch.stack([_huber_location(p, sample_dim=2) for p in positions], dim=2)
+    displacements = centers - centers[:, :1]
+    consensus = _huber_location(displacements, sample_dim=2)
+    scatter = torch.stack([
+        _midpoint_median((p - centers[:, :, i:i+1]).norm(dim=-1), dim=-1)
+        for i, p in enumerate(positions)], dim=-1)
+    scores = (displacements - consensus.unsqueeze(2)).norm(dim=-1) + scatter + scatter[:, :1]
+    pw = reliability(scores)
+    prior = torch.cat([pw[..., i:i+1].expand(-1, -1, p.shape[2])
+                       for i, p in enumerate(positions)], dim=2).unsqueeze(-1)
+    all_positions = torch.cat(positions, dim=2)
+    # Identical weights for current/reference fit prevent static spatial bias.
+    location = _huber_location(all_positions, sample_dim=2, prior_weights=prior)
+    reference_location = _huber_location(all_positions[:, :1].expand(-1, time, -1, -1),
+                                        sample_dim=2, prior_weights=prior)
+    relative_position = (location - reference_location) / float(center_scale)
+
+    all_rays = torch.cat(rays, dim=2)
+    reference = all_rays[:, :1].expand(-1, time, -1, -1)
+    pilot = _robust_relative_rotation(all_rays, reference)
+    residuals, geometries = [], []
+    eye = torch.eye(3, device=tiles.device, dtype=torch.float64)
+    for ray in rays:
+        ref = ray[:, :1].expand(-1, time, -1, -1)
+        fitted = torch.einsum('btij,btnj->btni', pilot, ref)
+        residuals.append(_midpoint_median((ray - fitted).norm(dim=-1), dim=-1))
+        information = eye - torch.einsum('btni,btnj->btij', ref, ref) / ref.shape[2]
+        geometries.append(torch.linalg.eigvalsh(information)[..., 0].clamp_min(0))
+    geom = torch.stack(geometries, dim=-1)
+    geometry_factor = (geom / _midpoint_median(geom, dim=-1).unsqueeze(-1).clamp_min(1e-9)).clamp(0.25, 1)
+    rw = (reliability(torch.stack(residuals, dim=-1)) * geometry_factor).clamp_min(0.05)
+    prior = torch.cat([rw[..., i:i+1].expand(-1, -1, r.shape[2])
+                       for i, r in enumerate(rays)], dim=2)
+    relative_rotation = _robust_relative_rotation(all_rays, reference, prior_weights=prior)
+    return _absolute_pose_from_relative(relative_position, relative_rotation, base_pose7,
+                                        output_dtype=tiles.dtype)
+
+
+def _decode_pose_tiles_block_position_joint_rotation(
+    tiles: torch.Tensor, base_pose7: torch.Tensor, *, block_grid: int = 4,
+    **kwargs: Any,
+) -> torch.Tensor:
+    """Combine block translation and joint rotation using identical inputs."""
+    block = _decode_pose_tiles_robust_block_consensus(
+        tiles, base_pose7, block_grid=block_grid, **kwargs
+    )
+    joint = _decode_pose_tiles_robust_joint(tiles, base_pose7, **kwargs)
+    return torch.cat((block[..., :3], joint[..., 3:]), dim=-1)
 
 
 class RothkoCodec:
@@ -1063,6 +1170,8 @@ class RothkoCodec:
             )
             cfg = self.config
             decoder = {
+                ROTHKO_DECODE_MODE_BLOCK_POSITION_JOINT_ROTATION: _decode_pose_tiles_block_position_joint_rotation,
+                ROTHKO_DECODE_MODE_ROBUST_BLOCK_WEIGHTED_JOINT: _decode_pose_tiles_robust_block_weighted_joint,
                 ROTHKO_DECODE_MODE_ROBUST_JOINT: _decode_pose_tiles_robust_joint,
                 ROTHKO_DECODE_MODE_ROBUST_TILEWISE: _decode_pose_tiles_robust_tilewise,
                 ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS: (
@@ -1079,7 +1188,7 @@ class RothkoCodec:
                 ),
                 "anchor_alpha": self.decode_anchor_alpha,
             }
-            if self.decode_mode == ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS:
+            if self.decode_mode in (ROTHKO_DECODE_MODE_ROBUST_BLOCK_CONSENSUS, ROTHKO_DECODE_MODE_BLOCK_POSITION_JOINT_ROTATION, ROTHKO_DECODE_MODE_ROBUST_BLOCK_WEIGHTED_JOINT):
                 decoder_kwargs["block_grid"] = self.decode_block_grid
             left_kwargs = dict(decoder_kwargs)
             right_kwargs = dict(decoder_kwargs)
