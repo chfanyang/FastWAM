@@ -1,0 +1,35 @@
+# @package _global_
+defaults:
+  - robotwin_c2r_rothko_centerfrac05_full_wan22_5b_1e-4
+  - _self_
+
+output_dir: ./runs/robotwin_c2r_7task_rothko_centerfrac05_full_wan22_5b_1e-4/${now:%Y-%m-%d}_${now:%H-%M-%S}
+data:
+  train:
+    _target_: fastwam.datasets.lerobot.robotwin_c2r_subset.RobotWinC2RTaskSubset
+    c2r_task_names:
+      - click_bell
+      - click_alarmclock
+      - grab_roller
+      - turn_switch
+      - lift_pot
+      - beat_block_hammer
+      - move_playingcard_away
+    latent_cache_dir: /mnt/hwdata/cfy/FastWAM/data/robotwin_c2r_clean50_wan22_centerfrac05_bf16_h16_latents
+    latent_cache_only: true
+    pretrained_norm_stats: /mnt/hwdata/cfy/FastWAM/data/robotwin_c2r_clean50_wan22_centerfrac05_bf16_h16_latents/dataset_stats.json
+model:
+  video_dit_config:
+    use_gradient_checkpointing: false
+
+# Eight GPUs: 4 * 4 * 8 = 128 effective batch; natural window sampling.
+batch_size: 4
+gradient_accumulation_steps: 4
+num_epochs: 10
+max_steps: null
+eval_every_epochs: 1
+save_every_epochs: 3
+state_save_every_epochs: 5
+save_at_end: true
+wandb:
+  name: robotwin_c2r_7task_rothko_centerfrac05_full_wan22_5b_1e-4

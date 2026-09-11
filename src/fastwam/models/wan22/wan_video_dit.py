@@ -347,6 +347,7 @@ class WanVideoDiT(torch.nn.Module):
         action_group_causal_mask_mode = "causal",
         video_attention_mask_mode: str = "bidirectional",
         use_gradient_checkpointing: bool = False,
+        gradient_checkpointing_layers: Optional[Sequence[int]] = None,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -407,8 +408,20 @@ class WanVideoDiT(torch.nn.Module):
             self.action_group_causal_mask_mode = action_group_causal_mask_mode
         
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        # None preserves the historical all-blocks behavior. The existing
+        # boolean remains the master switch; an empty list selects no blocks.
+        self.gradient_checkpointing_layers = (
+            None if gradient_checkpointing_layers is None
+            else frozenset(gradient_checkpointing_layers)
+        )
+        if self.gradient_checkpointing_layers is not None:
+            if any(type(i) is not int or not 0 <= i < num_layers
+                   for i in self.gradient_checkpointing_layers):
+                raise ValueError("gradient_checkpointing_layers must contain valid zero-based block indices")
         if self.use_gradient_checkpointing:
             logger.info("Using gradient checkpointing for DiT blocks. This will save memory but use more computation.")
+            if self.gradient_checkpointing_layers is not None:
+                logger.info("Gradient checkpointing selected blocks: %s", sorted(self.gradient_checkpointing_layers))
             
 
     def patchify(self, x: torch.Tensor, control_camera_latents_input: Optional[torch.Tensor] = None):
@@ -900,8 +913,11 @@ class WanVideoDiT(torch.nn.Module):
             frame_roles=pre_state["meta"]["latent_frame_roles"],
         ) if self.video_attention_mask_mode != "bidirectional" else None # special rule for faster speed
 
-        for block in self.blocks:
-            if self.use_gradient_checkpointing:
+        for block_index, block in enumerate(self.blocks):
+            if self.use_gradient_checkpointing and (
+                self.gradient_checkpointing_layers is None
+                or block_index in self.gradient_checkpointing_layers
+            ):
                 x_tokens = gradient_checkpoint_forward(
                     block,
                     self.use_gradient_checkpointing,

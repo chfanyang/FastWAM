@@ -69,8 +69,12 @@ ROBOTWIN_TASK_TO_EPISODE_RANGE = {
 }
 
 
-def resolve_robotwin_episode_indices(task_names: Sequence[str]) -> list[int]:
+def resolve_robotwin_episode_indices(task_names: Sequence[str] | None, variant: str = "all") -> list[int]:
     """Resolve released RoboTwin task names to ordered episode indices."""
+    if variant not in {"all", "clean", "randomized"}:
+        raise ValueError(f"Unknown RoboTwin data variant: {variant!r}")
+    if task_names is None:
+        task_names = ROBOTWIN_TASK_NAMES
     if isinstance(task_names, str):
         raise TypeError("robotwin_task_names must be a sequence of task names, not a string")
 
@@ -89,5 +93,7 @@ def resolve_robotwin_episode_indices(task_names: Sequence[str]) -> list[int]:
         if task_name in seen:
             continue
         seen.add(task_name)
-        episode_indices.extend(ROBOTWIN_TASK_TO_EPISODE_RANGE[task_name])
+        block = ROBOTWIN_TASK_TO_EPISODE_RANGE[task_name]
+        selected = block[:50] if variant == "clean" else block[50:] if variant == "randomized" else block
+        episode_indices.extend(selected)
     return episode_indices

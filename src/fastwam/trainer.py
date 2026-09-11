@@ -321,6 +321,14 @@ class Wan22Trainer:
         self.train_loader = self._build_loader(self.train_dataset, worker_init_fn=worker_init_fn)
         total_train_steps = self._estimate_total_train_steps()
         self.max_steps = total_train_steps
+        # Optional epoch-derived intervals, using the same epoch definition as
+        # the training budget. Existing step-based configurations are unchanged.
+        for option, attribute in (("save_every_epochs", "save_every"), ("state_save_every_epochs", "state_save_every"), ("eval_every_epochs", "eval_every")):
+            interval = cfg.get(option)
+            if interval is not None:
+                if cfg.get("max_steps") is not None or int(interval) <= 0:
+                    raise ValueError(f"{option} requires max_steps=null and a positive epoch interval")
+                setattr(self, attribute, (total_train_steps // self.num_epochs) * int(interval))
         warmup_steps = int(total_train_steps * self.warmup_ratio)
         self.scheduler = self._build_scheduler(
             scheduler_type=cfg.lr_scheduler_type,
@@ -381,6 +389,12 @@ class Wan22Trainer:
     def _wandb_log(self, payload: dict):
         if self.wandb_run is None:
             return
+        if self.cfg.get("diagnostics_on_train", False):
+            payload = {
+                (key.replace("eval/", "train_diagnostic/", 1).replace("val_loss", "denoising_loss")
+                 if key.startswith("eval/") else key): value
+                for key, value in payload.items()
+            }
         self.wandb_run.log(payload, step=self.global_step)
 
     def _finish_wandb(self):

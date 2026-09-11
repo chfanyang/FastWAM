@@ -9,7 +9,7 @@ import json
 import math
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -56,13 +56,17 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _init_distributed() -> tuple[int, int, int]:
+def _init_distributed(timeout_seconds: int = 7200) -> tuple[int, int, int]:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    if world_size > 1 and not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
     torch.cuda.set_device(local_rank)
+    if world_size > 1 and not dist.is_initialized():
+        # Ranks encode independent shards. End-of-job skew can exceed NCCL's
+        # default ten minutes even when every rank is making progress.
+        dist.init_process_group(
+            backend="nccl", timeout=timedelta(seconds=timeout_seconds)
+        )
     return rank, world_size, local_rank
 
 
@@ -119,6 +123,11 @@ def main() -> None:
     )
     parser.add_argument("--samples-per-shard", type=int, default=4096)
     parser.add_argument("--log-every", type=int, default=20)
+    parser.add_argument("--distributed-timeout-seconds", type=int, default=7200)
+    parser.add_argument(
+        "--benchmark-max-samples", type=int, default=0,
+        help="Benchmark only the first N windows; 0 preserves full-cache generation. Partial coverage cannot be used as a full training cache.",
+    )
     parser.add_argument("override", nargs="*")
     args = parser.parse_args()
 
@@ -126,8 +135,12 @@ def main() -> None:
         raise RuntimeError("CUDA is required for latent precomputation.")
     if args.batch_size <= 0 or args.samples_per_shard <= 0:
         raise ValueError("batch size and samples per shard must be positive.")
+    if args.benchmark_max_samples < 0:
+        raise ValueError("benchmark-max-samples must be non-negative.")
 
-    rank, world_size, local_rank = _init_distributed()
+    if args.distributed_timeout_seconds <= 0:
+        raise ValueError("distributed-timeout-seconds must be positive")
+    rank, world_size, local_rank = _init_distributed(args.distributed_timeout_seconds)
     setup_logging(is_main_process=rank == 0)
     register_default_resolvers()
     output_dir = args.output_dir.expanduser().resolve()
@@ -137,9 +150,9 @@ def main() -> None:
     config_dir = str((Path(__file__).resolve().parents[1] / "configs").resolve())
     overrides = [
         f"task={args.task}",
-        "data.train.latent_cache_dir=null",
-        "data.train.latent_cache_only=false",
-        "data.train.sample_error_mode=raise",
+        "++data.train.latent_cache_dir=null",
+        "++data.train.latent_cache_only=false",
+        "++data.train.sample_error_mode=raise",
         *args.override,
     ]
     with initialize_config_dir(config_dir=config_dir, version_base="1.3"):
@@ -161,14 +174,15 @@ def main() -> None:
         int(cfg.data.train.video_size[0]) // int(vae.upsampling_factor),
         int(cfg.data.train.video_size[1]) // int(vae.upsampling_factor),
     )
-    shards = _shard_specs(len(dataset), args.samples_per_shard)
+    num_samples = min(len(dataset), args.benchmark_max_samples) if args.benchmark_max_samples else len(dataset)
+    shards = _shard_specs(num_samples, args.samples_per_shard)
     metadata = {
         "cache_version": LATENT_CACHE_VERSION,
         "complete": False,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_task": args.task,
         "source_overrides": overrides,
-        "num_samples": len(dataset),
+        "num_samples": num_samples,
         "latent_shape": list(latent_shape),
         "modalities": ["rgb", "raymap"],
         "dtype": LATENT_CACHE_DTYPE,
@@ -179,6 +193,9 @@ def main() -> None:
         "samples_per_shard": args.samples_per_shard,
         "shards": shards,
     }
+    if args.benchmark_max_samples:
+        metadata["benchmark_only"] = True
+        metadata["full_dataset_num_samples"] = len(dataset)
     metadata_path = output_dir / LATENT_CACHE_METADATA
     success_path = output_dir / LATENT_CACHE_SUCCESS
     if rank == 0:
@@ -216,19 +233,26 @@ def main() -> None:
         _write_json_atomic(metadata_path, metadata)
     _barrier()
 
-    shard_begin = len(shards) * rank // world_size
-    shard_end = len(shards) * (rank + 1) // world_size
-    local_shards = shards[shard_begin:shard_end]
-    pending_shards = []
+    # Freeze one pending list before any rank writes new shards. Repartition
+    # remaining work, not the original full list, when world size changes.
+    pending_all = None
+    if rank == 0:
+        pending_all = [
+            shard for shard in shards
+            if not ((output_dir / shard["file"]).is_file()
+                    and (output_dir / shard["file"]).stat().st_size
+                    == _expected_shard_bytes(shard, latent_shape))
+        ]
+    pending_all = _broadcast_object(pending_all, rank)
+    pending_shards = pending_all[
+        len(pending_all) * rank // world_size:
+        len(pending_all) * (rank + 1) // world_size
+    ]
     indices = []
-    for shard in local_shards:
-        final_path = output_dir / shard["file"]
-        expected_bytes = _expected_shard_bytes(shard, latent_shape)
-        if final_path.is_file() and final_path.stat().st_size == expected_bytes:
-            logger.info("Rank %d skipping complete shard %s", rank, final_path.name)
-            continue
-        pending_shards.append(shard)
+    for shard in pending_shards:
         indices.extend(range(int(shard["start"]), int(shard["end"])))
+    logger.info("Rank %d assigned %d pending shards (%d samples); %d completed shards reused",
+                rank, len(pending_shards), len(indices), len(shards) - len(pending_all))
 
     indexed_dataset = _IndexedDataset(dataset, indices)
     loader = DataLoader(
@@ -342,7 +366,7 @@ def main() -> None:
             pair = torch.from_numpy(raw).view(torch.bfloat16)
             return pair[0], pair[1]
 
-        verification_indices = sorted({0, len(dataset) // 2, len(dataset) - 1})
+        verification_indices = sorted({0, num_samples // 2, num_samples - 1})
         verification_samples = []
         with torch.inference_mode():
             for index in verification_indices:
@@ -411,7 +435,7 @@ def main() -> None:
         logger.info(
             "Completed latent cache: %s samples=%d size=%.2f GiB",
             output_dir,
-            len(dataset),
+            num_samples,
             total_gib,
         )
     _barrier()

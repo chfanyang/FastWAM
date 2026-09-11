@@ -17,8 +17,14 @@ in third_party/RoboTwin/envs/robot/robot.py):
 The result is a 14-dim vector per frame: [left (pos3 + quat_wxyz4), right (...)].
 It is written to two new columns in every episode parquet:
     - `action.endpose`            (from the `action` joint targets)
-    - `observation.state.endpose` (from the `observation.state` measured joints)
+    - `observation.state.endpose` (from the `observation.state` joint values)
 and registered in meta/info.json and meta/episodes_stats.jsonl.
+
+For the released FastWAM RoboTwin data, `observation.state` matches the
+previous recorded joint drive targets, not measured joint positions. Its FK
+therefore need not equal the native, physically observed RoboTwin endpose.
+This script preserves that source-column meaning; it does not reconstruct
+measured end-effector poses from images or rename targets as measurements.
 
 Run with the RoboTwin environment (and ensure that it has a parquet engine such
 as pyarrow), e.g.:

@@ -1,0 +1,16 @@
+# @package _global_
+defaults:
+  - robotwin_c2r_rothko_centerfrac05_full_wan22_5b_1e-4
+  - _self_
+output_dir: ./runs/robotwin_c2r_rothko_centerfrac05_full_wan21_1_3b_1e-4/${now:%Y-%m-%d}_${now:%H-%M-%S}
+model:
+  model_id: Wan-AI/Wan2.1-T2V-1.3B
+  model_variant: wan2.1-t2v-1.3b
+  video_dit_config:
+    in_dim: 16
+    hidden_dim: 1536
+    ffn_dim: 8960
+    out_dim: 16
+    num_heads: 12
+wandb:
+  name: robotwin_c2r_rothko_centerfrac05_full_wan21_1_3b_1e-4

@@ -70,7 +70,7 @@ def _iter_dataset_nodes(node: Any, path: str = "data"):
 
 
 def _collect_dataset_settings(data_cfg: DictConfig):
-    dataset_selections: list[tuple[str, tuple[str, ...] | None]] = []
+    dataset_selections: list[tuple[str, tuple[str, ...] | None, str]] = []
     cache_dirs: list[Path] = []
     context_lens = set()
 
@@ -94,7 +94,7 @@ def _collect_dataset_settings(data_cfg: DictConfig):
                 if raw_task_names is not None
                 else None
             )
-            selection = (ds_str, task_names)
+            selection = (ds_str, task_names, str(node.get("robotwin_data_variant", "all")))
             if selection not in dataset_selections:
                 dataset_selections.append(selection)
 
@@ -109,11 +109,14 @@ def _collect_dataset_settings(data_cfg: DictConfig):
         logger.info("Discovered dataset node `%s` with %d dataset_dirs.", node_path, len(raw_dirs))
 
     # A full-dataset selection supersedes subset selections for the same directory.
-    full_dataset_dirs = {ds_dir for ds_dir, task_names in dataset_selections if task_names is None}
+    full_dataset_dirs = {
+        ds_dir for ds_dir, task_names, variant in dataset_selections
+        if task_names is None and variant == "all"
+    }
     dataset_selections = [
         selection
         for selection in dataset_selections
-        if selection[1] is None or selection[0] not in full_dataset_dirs
+        if (selection[1] is None and selection[2] == "all") or selection[0] not in full_dataset_dirs
     ]
     return dataset_selections, cache_dirs, context_lens
 
@@ -144,27 +147,27 @@ def _read_task_indices_for_episodes(ds_dir: Path, episode_indices: list[int]) ->
 
 
 def _read_unique_prompts(
-    dataset_selections: list[tuple[str, tuple[str, ...] | None]],
+    dataset_selections: list[tuple[str, tuple[str, ...] | None, str]],
 ) -> list[str]:
     prompts: list[str] = []
     seen = set()
     total_task_rows = 0
 
-    for ds_dir_str, task_names in dataset_selections:
+    for ds_dir_str, task_names, variant in dataset_selections:
         ds_dir = Path(ds_dir_str)
         tasks_path = ds_dir / "meta" / "tasks.jsonl"
         if not tasks_path.exists():
             raise FileNotFoundError(f"Missing tasks file: {tasks_path}")
 
         selected_task_indices = None
-        if task_names is not None:
-            episode_indices = resolve_robotwin_episode_indices(task_names)
+        if task_names is not None or variant != "all":
+            episode_indices = resolve_robotwin_episode_indices(task_names, variant)
             selected_task_indices = _read_task_indices_for_episodes(ds_dir, episode_indices)
             logger.info(
                 "Selected %d text instructions from %d RoboTwin episodes for tasks: %s",
                 len(selected_task_indices),
                 len(episode_indices),
-                ", ".join(task_names),
+                ", ".join(task_names) if task_names is not None else "all",
             )
 
         with tasks_path.open("r", encoding="utf-8") as f:

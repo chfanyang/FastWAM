@@ -1,0 +1,67 @@
+# @package _global_
+defaults:
+  - override /data: robotwin_rothko
+  - override /model: fastwam_video_only_raymap
+  - _self_
+
+output_dir: ./runs/robotwin_c2r_rothko_centerfrac05_full_wan22_5b_1e-4/${now:%Y-%m-%d}_${now:%H-%M-%S}
+data:
+  train:
+    dataset_dirs:
+      - ./data/robotwin2.0_c2r_clean50
+    robotwin_task_names: null
+    # This independent dataset already contains only the 2,500 clean episodes.
+    # Do not apply the original 550-episode block selection to compact IDs.
+    robotwin_data_variant: all
+    robotwin_ee_pose_key: ee_pose_wxyz
+    raw_action_meta:
+      - {key: default, raw_shape: 14}
+      - {key: ee_pose_wxyz, raw_shape: 14}
+    raw_state_meta:
+      - {key: default, raw_shape: 14}
+      - {key: ee_pose_wxyz, raw_shape: 14}
+    val_set_proportion: 0.0
+    pretrained_norm_stats: null
+    rothko_norm_stats: ./data/robotwin2.0_c2r_clean50/rothko_actual_ee_q99p95_all_windows_h16_centerfrac05.pt
+    text_embedding_cache_dir: ./data/text_embeds_cache/robotwin
+    text_context_cache_max_entries: 256
+    rothko_config:
+      center_frac: 0.5
+  val: null
+model:
+  proprio_dim: null
+  vae_safetensors_path: null
+  skip_dit_load_from_pretrain: false
+finetune:
+  method: full
+  train_proprio_encoder: false
+
+# Initial memory-safe candidate; benchmark before the full run.
+# Four GPUs: 8 * 4 * 4 = 128 samples per optimizer update.
+batch_size: 8
+gradient_accumulation_steps: 4
+num_workers: 4
+learning_rate: 1.0e-4
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+num_epochs: 10
+max_steps: null
+save_every: 0
+state_save_every: 0
+save_every_epochs: 3
+state_save_every_epochs: 5
+save_at_end: true
+log_every: 10
+# Reuse fixed training samples only; W&B labels explicitly identify diagnostics.
+diagnostics_on_train: true
+eval_every: 1000
+eval_num_samples: 4
+eval_random_seed: 42
+eval_num_inference_steps: 20
+wandb:
+  enabled: true
+  project: fast-wam
+  name: robotwin_c2r_rothko_centerfrac05_full_wan22_5b_1e-4
+  group: robotwin_c2r_clean50
+  mode: online

@@ -61,6 +61,9 @@ def _uniform_starts(
     num_frames: int, horizon: int, windows_per_episode: int
 ) -> np.ndarray:
     count = num_frames - horizon + 1
+    # Explicit all-window mode mirrors dataset edge-repeat padding.
+    if windows_per_episode == 0:
+        return np.arange(num_frames, dtype=np.int64)
     if count <= 0:
         return np.empty(0, dtype=np.int64)
     if count <= windows_per_episode:
@@ -77,6 +80,7 @@ def _relative_future_positions(
     horizon: int,
 ) -> np.ndarray:
     future_indices = starts[:, None] + np.arange(horizon, dtype=np.int64)[None, :]
+    future_indices = np.minimum(future_indices, len(action_endpose) - 1)
     output = []
     for offset in (0, 7):
         base_position = state_endpose[starts, offset : offset + 3].astype(
@@ -110,19 +114,19 @@ def _histogram(
 
 
 def _process_shard(
-    arguments: tuple[Sequence[str], int, int, int, float]
+    arguments: tuple[Sequence[str], int, int, int, float, str]
 ) -> tuple[np.ndarray, np.ndarray, int, int, int]:
-    paths, horizon, windows_per_episode, bins, max_abs = arguments
+    paths, horizon, windows_per_episode, bins, max_abs, ee_pose_key = arguments
     histogram = np.zeros((3, bins), dtype=np.int64)
     maxima = np.zeros(3, dtype=np.float64)
     episodes_used = windows_used = overflow = 0
     for path in paths:
         frame = pd.read_parquet(
             path,
-            columns=["action.endpose", "observation.state.endpose"],
+            columns=[f"action.{ee_pose_key}", f"observation.state.{ee_pose_key}"],
         )
-        action_endpose = _stack_column(frame["action.endpose"])
-        state_endpose = _stack_column(frame["observation.state.endpose"])
+        action_endpose = _stack_column(frame[f"action.{ee_pose_key}"])
+        state_endpose = _stack_column(frame[f"observation.state.{ee_pose_key}"])
         starts = _uniform_starts(len(frame), horizon, windows_per_episode)
         if not len(starts):
             continue
@@ -241,6 +245,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--horizon", type=int, default=16)
     parser.add_argument("--windows-per-episode", type=int, default=32)
+    parser.add_argument("--robotwin-data-variant", choices=["all", "clean", "randomized"], default="all")
+    parser.add_argument("--ee-pose-key", choices=["endpose", "ee_pose_wxyz"], default="endpose")
     parser.add_argument("--quantile", type=float, default=0.9995)
     parser.add_argument("--bins", type=int, default=100_000)
     parser.add_argument("--histogram-max", type=float, default=1.0)
@@ -265,11 +271,12 @@ def main() -> None:
     args = build_parser().parse_args()
     if min(
         args.horizon,
-        args.windows_per_episode,
         args.bins,
         args.workers,
     ) < 1:
         raise ValueError("horizon, windows, bins, and workers must be positive.")
+    if args.windows_per_episode < 0:
+        raise ValueError("windows-per-episode must be >=0; 0 selects all starts including padded tails")
     if not 0.0 < args.quantile < 1.0:
         raise ValueError("quantile must be in (0,1).")
     if args.histogram_max <= 0:
@@ -286,7 +293,14 @@ def main() -> None:
         )
 
     dataset_root = args.dataset_root.resolve()
-    paths, info = _episode_paths(dataset_root, args.limit)
+    paths, info = _episode_paths(dataset_root, args.limit if args.robotwin_data_variant == "all" else None)
+    if args.robotwin_data_variant != "all":
+        from fastwam.datasets.lerobot.robotwin_tasks import resolve_robotwin_episode_indices
+        if int(info["total_episodes"]) != 27500:
+            raise ValueError("RoboTwin variant selection requires the released 27,500-episode dataset")
+        paths = [paths[i] for i in resolve_robotwin_episode_indices(None, args.robotwin_data_variant)]
+        if args.limit is not None:
+            paths = paths[:args.limit]
     worker_count = min(args.workers, len(paths))
     shard_size = math.ceil(len(paths) / worker_count)
     shards = [paths[index : index + shard_size] for index in range(0, len(paths), shard_size)]
@@ -297,6 +311,7 @@ def main() -> None:
             args.windows_per_episode,
             args.bins,
             args.histogram_max,
+            args.ee_pose_key,
         )
         for shard in shards
     ]
@@ -346,13 +361,16 @@ def main() -> None:
     metadata: dict[str, Any] = {
         "stats_format_version": 2,
         "representation": "rothko",
-        "encoding": "state_frame0_plus_future_action_endpose",
+        "encoding": "state_frame0_plus_future_action_endpose" if args.ee_pose_key == "endpose" else "official_measured_state_frame0_plus_future_ee_pose_wxyz",
+        "ee_pose_key": args.ee_pose_key,
         "quaternion_order": "wxyz",
         "dataset_root": str(dataset_root),
         "dataset_codebase_version": info.get("codebase_version"),
         "action_horizon": args.horizon,
         "pixel_frames": args.horizon + 1,
-        "sampling": "equal_episode_uniform_valid_windows",
+        "sampling": "all_frame_starts_edge_repeat_padding" if args.windows_per_episode == 0 else "equal_episode_uniform_valid_windows",
+        "robotwin_data_variant": args.robotwin_data_variant,
+        "selected_episode_indices": [int(Path(p).stem.split("_")[-1]) for p in paths],
         "windows_per_episode": args.windows_per_episode,
         "translation_quantile": args.quantile,
         "translation_abs_bounds_xyz_m": bounds.tolist(),

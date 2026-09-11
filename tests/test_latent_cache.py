@@ -178,6 +178,7 @@ class LatentCacheTest(unittest.TestCase):
             dataset.context_len = 4
             dataset._warned_legacy_text_cache = False
             dataset._text_context_memory_cache = {}
+            dataset.text_context_cache_max_entries = None
             with mock.patch("torch.load", wraps=torch.load) as load:
                 context0, mask0 = dataset._get_cached_text_context(prompt)
                 context1, mask1 = dataset._get_cached_text_context(prompt)

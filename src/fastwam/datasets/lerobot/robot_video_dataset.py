@@ -97,6 +97,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
         robotwin_task_names=None,
+        robotwin_data_variant: str = "all",
+        robotwin_ee_pose_key: str = "endpose",
         episode_split_manifest=None,
         episode_split: Optional[str] = None,
         raw_action_meta=None,
@@ -108,9 +110,13 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         sample_error_mode: str = "fallback",
         latent_cache_dir: Optional[str] = None,
         latent_cache_only: bool = False,
+        text_context_cache_max_entries: Optional[int] = None,
     ):
         dataset_dirs = [str(path) for path in dataset_dirs]
         self.dataset_dirs = dataset_dirs
+        self.robotwin_ee_pose_key = str(robotwin_ee_pose_key)
+        if self.robotwin_ee_pose_key not in {"endpose", "ee_pose_wxyz"}:
+            raise ValueError("robotwin_ee_pose_key must be endpose or ee_pose_wxyz")
         self.latent_cache_only = bool(latent_cache_only)
         if self.latent_cache_only and latent_cache_dir in (None, "", "null"):
             raise ValueError("`latent_cache_only=true` requires `latent_cache_dir`.")
@@ -121,9 +127,14 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 f"{self.sample_error_mode!r}."
             )
         episode_indices = None
-        if robotwin_task_names is not None:
+        if robotwin_data_variant not in {"all", "clean", "randomized"}:
+            raise ValueError(f"Unknown RoboTwin data variant: {robotwin_data_variant!r}")
+        if robotwin_task_names is not None or robotwin_data_variant != "all":
+            if robotwin_task_names is None:
+                from .robotwin_tasks import ROBOTWIN_TASK_NAMES
+                robotwin_task_names = list(ROBOTWIN_TASK_NAMES)
             robotwin_task_names = [str(name) for name in robotwin_task_names]
-            episode_indices = resolve_robotwin_episode_indices(robotwin_task_names)
+            episode_indices = resolve_robotwin_episode_indices(robotwin_task_names, robotwin_data_variant)
             logger.info(
                 "Selecting %d RoboTwin tasks (%d episodes): %s",
                 len(set(robotwin_task_names)),
@@ -198,10 +209,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         self.text_embedding_cache_dir = text_embedding_cache_dir
         self.context_len = context_len
         self._warned_legacy_text_cache = False
-        # LIBERO has only a small fixed instruction vocabulary. Avoid loading
-        # the same ~1 MiB context tensor from disk for every sampled window.
-        # DataLoader workers inherit/populate their own bounded-by-vocabulary
-        # copy; returned tensors are read-only from the dataset's perspective.
+        # None preserves historical vocabulary-sized caching. Large-vocabulary
+        # datasets can opt into a per-worker LRU bound; zero disables caching.
+        if text_context_cache_max_entries is not None and text_context_cache_max_entries < 0:
+            raise ValueError("text_context_cache_max_entries must be non-negative or None")
+        self.text_context_cache_max_entries = text_context_cache_max_entries
         self._text_context_memory_cache = {}
         self.skip_padding_as_possible = skip_padding_as_possible
         self.max_padding_retry = max_padding_retry
@@ -330,6 +342,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 None if norm_stats is None else norm_stats.fingerprint()
             ),
         )
+        if self.raymap_representation == "rothko" and self.robotwin_ee_pose_key != "endpose":
+            self.latent_cache_dataset_contract["robotwin_ee_pose_key"] = self.robotwin_ee_pose_key
         if latent_cache_dir not in (None, "", "null"):
             self.latent_cache = LatentCacheReader(
                 latent_cache_dir,
@@ -479,9 +493,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             if self.raymap_representation == "rothko":
                 required_raw = {
                     "raw_action.default": raw_action.get("default"),
-                    "raw_action.endpose": raw_action.get("endpose"),
+                    f"raw_action.{self.robotwin_ee_pose_key}": raw_action.get(self.robotwin_ee_pose_key),
                     "raw_state.default": raw_state.get("default"),
-                    "raw_state.endpose": raw_state.get("endpose"),
+                    f"raw_state.{self.robotwin_ee_pose_key}": raw_state.get(self.robotwin_ee_pose_key),
                 }
             else:
                 required_raw = {
@@ -505,8 +519,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             if self.raymap_representation == "rothko":
                 raw_action_qpos = raw_action["default"].float()
                 raw_state_qpos = raw_state["default"].float()
-                action_endpose = raw_action["endpose"].float()
-                state_endpose = raw_state["endpose"].float()
+                action_endpose = raw_action[self.robotwin_ee_pose_key].float()
+                state_endpose = raw_state[self.robotwin_ee_pose_key].float()
                 if action_endpose.shape != (self.num_frames - 1, 14):
                     raise ValueError(
                         f"Expected action endpose {(self.num_frames - 1, 14)}, "
@@ -640,6 +654,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         cache_path = os.path.join(cache_dir, f"{hashed}.t5_len{self.context_len}.wan22ti2v5b.pt")
         memory_cached = self._text_context_memory_cache.get(cache_path)
         if memory_cached is not None:
+            if self.text_context_cache_max_entries is not None:
+                self._text_context_memory_cache.pop(cache_path)
+                self._text_context_memory_cache[cache_path] = memory_cached
             return memory_cached
         if not os.path.exists(cache_path):
             raise FileNotFoundError(
@@ -688,7 +705,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 f"Cached mask_len mismatch: expected {self.context_len}, got {context_mask.shape[0]} in {cache_path}"
             )
 
-        self._text_context_memory_cache[cache_path] = (context, context_mask)
+        limit = self.text_context_cache_max_entries
+        if limit != 0:
+            self._text_context_memory_cache[cache_path] = (context, context_mask)
+            if limit is not None and len(self._text_context_memory_cache) > limit:
+                self._text_context_memory_cache.pop(next(iter(self._text_context_memory_cache)))
         return context, context_mask
 
     def __getitem__(self, idx):
