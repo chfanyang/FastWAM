@@ -248,3 +248,7 @@ onelogger.log
 
 # Local upstream benchmark checkout; FastWAM integration code lives outside it.
 third_party/LIBERO-plus/
+
+# Local paper materials and benchmark checkout.
+/paper/
+/third_party/VLABench/
