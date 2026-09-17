@@ -1025,6 +1025,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         rand_device: str = "cpu",
         tiled: bool = False,
         decode_future_rgb: bool = True,
+        empty_cuda_cache_before_decode: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
         self.eval()
@@ -1169,6 +1170,15 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                 }
             )
         if current_endpose is not None:
+            if empty_cuda_cache_before_decode and decoded_raymap.is_cuda:
+                free_before, _ = torch.cuda.mem_get_info(decoded_raymap.device)
+                torch.cuda.empty_cache()
+                free_after, _ = torch.cuda.mem_get_info(decoded_raymap.device)
+                logger.info(
+                    "[decode cache] device=%s released=%.1f MiB free=%.1f MiB",
+                    decoded_raymap.device,
+                    (free_after - free_before) / 2**20, free_after / 2**20,
+                )
             if current_endpose.ndim == 1:
                 current_endpose = current_endpose.unsqueeze(0)
             pose, gripper = self.raymap_codec.decode(

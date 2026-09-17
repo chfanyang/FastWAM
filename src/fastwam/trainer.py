@@ -727,6 +727,8 @@ class Wan22Trainer:
             "seed": eval_seed,
             "tiled": False,
         }
+        if self.cfg.get("eval_empty_cuda_cache", False):
+            infer_kwargs["empty_cuda_cache_before_decode"] = True
         prediction = model.infer(**infer_kwargs)
         target_video = (
             (video0.detach().float().cpu().clamp(-1, 1) + 1.0) * 0.5
@@ -989,6 +991,16 @@ class Wan22Trainer:
     def evaluate(self):
         if self.val_dataset is None:
             return None
+
+        if self.cfg.get("eval_empty_cuda_cache", False) and self.accelerator.device.type == "cuda":
+            free_before, _ = torch.cuda.mem_get_info(self.accelerator.device)
+            torch.cuda.empty_cache()
+            free_after, _ = torch.cuda.mem_get_info(self.accelerator.device)
+            logger.info(
+                "[eval cache] rank=%d released=%.1f MiB free=%.1f MiB",
+                self.accelerator.process_index,
+                (free_after - free_before) / 2**20, free_after / 2**20,
+            )
 
         model = self.accelerator.unwrap_model(self.model)
         was_dit_training = model.dit.training
@@ -1565,11 +1577,26 @@ class Wan22Trainer:
                             wandb_payload[f"train/{key}"] = value
                         self._wandb_log(wandb_payload)
 
+                    weights_saved_this_step = False
+                    state_saved_this_step = False
                     if (
                         self.eval_every > 0
                         and self.val_dataset is not None
                         and self.global_step % self.eval_every == 0
                     ):
+                        if self.cfg.get("save_before_eval", False):
+                            ckpt_info = self.save_checkpoint(
+                                save_weights=True, save_state=True,
+                            )
+                            weights_saved_this_step = True
+                            state_saved_this_step = True
+                            if self.accelerator.is_main_process:
+                                logger.info(
+                                    "[ckpt before eval] step=%d weights=%s state=%s",
+                                    self.global_step,
+                                    ckpt_info["weights_path"],
+                                    ckpt_info["state_path"],
+                                )
                         metrics = self.evaluate()
                         self.accelerator.wait_for_everyone()
                         if metrics is not None and self.accelerator.is_main_process:
@@ -1642,14 +1669,14 @@ class Wan22Trainer:
                                     eval_payload[f"eval/{key}"] = float(metrics[key])
                             self._wandb_log(eval_payload)
 
-                    weights_saved_this_step = False
-                    state_saved_this_step = False
                     weights_due = (
-                        self.save_every > 0
+                        not weights_saved_this_step
+                        and self.save_every > 0
                         and self.global_step % self.save_every == 0
                     )
                     state_due = (
-                        self.state_save_every > 0
+                        not state_saved_this_step
+                        and self.state_save_every > 0
                         and self.global_step % self.state_save_every == 0
                     )
                     if weights_due or state_due:
