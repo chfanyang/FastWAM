@@ -302,6 +302,13 @@ run_libero_eval() {
     tmux set-option -t "$SESSION_NAME" default-shell /bin/bash
     tmux set-option -t "$SESSION_NAME" default-command "/bin/bash --noprofile --norc"
     tmux set-environment -t "$SESSION_NAME" TMPDIR "${TMPDIR:-/tmp}"
+    # tmux panes inherit the server/session environment, not necessarily the
+    # manager's exports. Forward explicit thread limits only to this session.
+    for thread_var in OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS; do
+        if [[ -n "${!thread_var:-}" ]]; then
+            tmux set-environment -t "$SESSION_NAME" "$thread_var" "${!thread_var}"
+        fi
+    done
 
     # Create the grid layout
     create_grid_layout() {

@@ -1,0 +1,598 @@
+{
+  "baseline_dir": "/mnt/hwdata/cfy/FastWAM/evaluate_results/libero_plus/libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4/ckpt021700_vaeDecoderStep7498_replan8_ensembleOff_robustJointAnchor0_stratified10_seed42",
+  "baseline_config": {
+    "ckpt": "/mnt/hwdata/cfy/FastWAM/runs/libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4/2026-08-28_17-06-22/checkpoints/weights/step_021700.pt",
+    "seed": 42,
+    "eval_num_inference_steps": 20,
+    "eval_random_seed": 42,
+    "model": {
+      "_target_": "fastwam.runtime.create_fastwam_video_only_raymap",
+      "model_id": "Wan-AI/Wan2.1-T2V-1.3B",
+      "tokenizer_model_id": "Wan-AI/Wan2.1-T2V-1.3B",
+      "tokenizer_max_len": 128,
+      "load_text_encoder": true,
+      "proprio_dim": null,
+      "redirect_common_files": true,
+      "vae_safetensors_path": "/mnt/hwdata/cfy/FastWAM/runs/libero_rothko_vae_decoder_wan21_all4_centerfrac05_h16_bs2_ga8_lr1e-5_ep2/Wan2.1_VAE_libero_rothko_step007498.safetensors",
+      "allow_vae_mismatch": true,
+      "inference_predict_future_rgb": false,
+      "skip_dit_load_from_pretrain": true,
+      "action_horizon": 16,
+      "raymap_representation": "libero_rothko",
+      "rothko_norm_stats": "./data/libero_mujoco3.3.2/libero_rothko_region_symmetric_q99p95_h16_224x448.pt",
+      "rothko_decode_mode": "robust_joint",
+      "rothko_decode_anchor_alpha": 0,
+      "rothko_decode_block_grid": 4,
+      "video_dit_config": {
+        "has_image_input": false,
+        "patch_size": [
+          1,
+          2,
+          2
+        ],
+        "in_dim": 16,
+        "hidden_dim": 1536,
+        "ffn_dim": 8960,
+        "freq_dim": 256,
+        "text_dim": 4096,
+        "out_dim": 16,
+        "num_heads": 12,
+        "attn_head_dim": 128,
+        "num_layers": 30,
+        "eps": 1e-06,
+        "seperated_timestep": true,
+        "require_clip_embedding": false,
+        "require_vae_embedding": false,
+        "fuse_vae_embedding_in_latents": true,
+        "use_gradient_checkpointing": false,
+        "video_attention_mask_mode": "rgb_then_raymap_block_causal",
+        "action_conditioned": false,
+        "action_dim": 7,
+        "action_group_causal_mask_mode": "group_diagonal"
+      },
+      "scheduler": {
+        "train_shift": 5.0,
+        "infer_shift": 5.0,
+        "num_train_timesteps": 1000
+      },
+      "loss": {
+        "lambda_rgb": 1.0,
+        "lambda_raymap": 5.0
+      },
+      "rothko_config": {
+        "image_height": 224,
+        "image_width": 448,
+        "tile_height": 224,
+        "tile_width": 224,
+        "focal": 0.2,
+        "center_scale": 1.0,
+        "dir_scale": 1.0,
+        "center_frac": 0.5,
+        "boundary_margin": 8,
+        "outer_margin": 8,
+        "duplicate_horizontal": true
+      },
+      "model_variant": "wan2.1-t2v-1.3b",
+      "action_dit_pretrained_path": null
+    },
+    "EVALUATION": {
+      "task_suite_name": "libero_spatial",
+      "task_id": 0,
+      "num_trials": 1,
+      "output_dir": "/mnt/hwdata/cfy/FastWAM/evaluate_results/libero_plus/libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4/ckpt021700_vaeDecoderStep7498_replan8_ensembleOff_robustJointAnchor0_stratified10_seed42",
+      "env_num": 1,
+      "num_steps_wait": 30,
+      "replan_steps": 8,
+      "binarize_gripper": true,
+      "use_action_ensembler": false,
+      "action_ensemble_decay": 0.01,
+      "visualize_future_video": false,
+      "save_prediction_videos": false,
+      "save_control_trace": false,
+      "action_horizon": null,
+      "num_inference_steps": 20,
+      "sigma_shift": null,
+      "text_cfg_scale": 1.0,
+      "negative_prompt": "",
+      "rand_device": "cpu",
+      "tiled": false,
+      "dataset_stats_path": "/mnt/hwdata/cfy/FastWAM/runs/libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4/2026-08-28_17-06-22/dataset_stats.json",
+      "device": "cuda",
+      "save_rollout_videos": false,
+      "cache_prompt_embedding": true
+    }
+  },
+  "file_sha256": {
+    "runs/libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4/2026-08-28_17-06-22/checkpoints/weights/step_021700.pt": "bf7e807d3cb5fe0c016114d0acaff143ac8ca29e9bd9c98a237cc0236b20efd4",
+    "runs/libero_rothko_vae_decoder_wan21_all4_centerfrac05_h16_bs2_ga8_lr1e-5_ep2/Wan2.1_VAE_libero_rothko_step007498.safetensors": "dc59e8670172f0b6d90cb751c3c94daafc368d53fcd14727b95705ac1772565f",
+    "runs/libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4/2026-08-28_17-06-22/dataset_stats.json": "1e519a3ab1da802ba5731e0bd70728fa11d20e99d21378ebbf2671159cddb076",
+    "data/libero_mujoco3.3.2/libero_rothko_region_symmetric_q99p95_h16_224x448.pt": "1e82a892d4c97f63e8198b354c33de1cd704ec15fffa8e902305631c1aeba4f6"
+  },
+  "host": "manipulation",
+  "num_tasks": 52,
+  "tasks": [
+    {
+      "suite": "libero_goal",
+      "task_id": 1429,
+      "language": "place the rounded foodholding container on the flat dish for serving",
+      "bddl_file": "put_the_bowl_on_the_plate_language_9_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 77.03053164482117,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 140,
+      "language": "pick up the black bowl on the cookie box and place it on the plate table 16",
+      "bddl_file": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_table_16.bddl",
+      "category": "Background Textures",
+      "a800_duration": 105.71400189399719,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 64,
+      "language": "pick up the black bowl from table center and place it on the plate tb 20",
+      "bddl_file": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_tb_20.bddl",
+      "category": "Background Textures",
+      "a800_duration": 95.60717415809631,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 654,
+      "language": "pick up the black bowl from table center and place it on the plate view 0 0 127 0 0 initstate 0",
+      "bddl_file": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_view_0_0_127_0_0_initstate_0.bddl",
+      "category": "Camera Viewpoints",
+      "a800_duration": 95.85197186470032,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 692,
+      "language": "pick up the black bowl on the cookie box and place it on the plate view 0 0 137 0 0 initstate 0",
+      "bddl_file": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_view_0_0_137_0_0_initstate_0.bddl",
+      "category": "Camera Viewpoints",
+      "a800_duration": 93.30343103408813,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 717,
+      "language": "pick up the black bowl on the cookie box and place it on the plate view 52 0 100 0 0 initstate 0",
+      "bddl_file": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_view_52_0_100_0_0_initstate_0.bddl",
+      "category": "Camera Viewpoints",
+      "a800_duration": 92.4839334487915,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 932,
+      "language": "pick up the black bowl next to the plate and place it on the plate view 332 0 100 0 0 initstate 0",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate_view_332_0_100_0_0_initstate_0.bddl",
+      "category": "Camera Viewpoints",
+      "a800_duration": 88.76687479019165,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 729,
+      "language": "pick up the black bowl on the cookie box and place it on the plate view 58 0 100 0 0 initstate 0",
+      "bddl_file": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_view_58_0_100_0_0_initstate_0.bddl",
+      "category": "Camera Viewpoints",
+      "a800_duration": 88.24546027183533,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 935,
+      "language": "pick up the black bowl next to the plate and place it on the plate view 333 15 100 0 0 initstate 0",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate_view_333_15_100_0_0_initstate_0.bddl",
+      "category": "Camera Viewpoints",
+      "a800_duration": 81.6775438785553,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 698,
+      "language": "pick up the black bowl on the cookie box and place it on the plate view 0 0 100 8 8 initstate 0",
+      "bddl_file": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_view_0_0_100_8_8_initstate_0.bddl",
+      "category": "Camera Viewpoints",
+      "a800_duration": 76.50138854980469,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1307,
+      "language": "could you put the black bowl on the plate for me",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate_language_27_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 108.91356039047241,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1351,
+      "language": "can you move the black bowl from the wooden cabinet to the plate",
+      "bddl_file": "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate_language_27_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 103.5706717967987,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1032,
+      "language": "could you put the black bowl thats next to the ramekin on the plate",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate_language_3_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 101.5804934501648,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1204,
+      "language": "grasp the darkcolored rounded container positioned beside the container housing baked sweet treats and set it on the flat dish designed for single servings of food",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate_language_5_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 99.70017123222351,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1227,
+      "language": "grasp the dark bowl beside the biscuit container and set it on the dish",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate_language_29_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 99.27398204803467,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1347,
+      "language": "pick up the darkhued dish resting on the surface constructed of tree material and put it down atop the dish designed for main course servings",
+      "bddl_file": "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate_language_23_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 97.99252915382385,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1308,
+      "language": "pick up the darkhued rounded vessel beside the flat circular dish and position it atop the flat circular dish",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate_language_28_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 93.9031753540039,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1220,
+      "language": "id appreciate if you could pick up the black bowl next to the cookie box and place it on the plate for me",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate_language_22_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 92.98679447174072,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1208,
+      "language": "can you put the black bowl next to the cookie box onto the plate for me",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate_language_10_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 90.40775799751282,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1304,
+      "language": "i noticed the black bowl is beside the plate instead of on it could you correct that by moving it",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate_language_24_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 88.94326448440552,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1086,
+      "language": "could you put the black bowl from the center of the table onto the plate",
+      "bddl_file": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_language_42_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 85.84833192825317,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1197,
+      "language": "could you please pick up the black bowl thats sitting on the ramekin and carefully place it onto the plate",
+      "bddl_file": "pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate_language_46_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 84.41077995300293,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1302,
+      "language": "to prevent spills were putting bowls on plates today please move the black bowl accordingly",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate_language_22_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 83.50519156455994,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1081,
+      "language": "could you move the black bowl from the center of the table onto the plate thank you",
+      "bddl_file": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_language_35_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 81.07062435150146,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1110,
+      "language": "before the guests arrive could you transfer the black bowl from the cookie box to the plate",
+      "bddl_file": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_language_26_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 79.54704880714417,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1114,
+      "language": "pick up the darkcolored rounded container resting on the container of baked sweet treats and place it on the flat dish for serving food",
+      "bddl_file": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_language_31_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 78.94970607757568,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1069,
+      "language": "could you move the black bowl from the center of the table to the plate",
+      "bddl_file": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_language_12_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 77.70948052406311,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1017,
+      "language": "lets adjust the table arrangement pick up the black bowl located between the plate and ramekin and put it on the plate",
+      "bddl_file": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_language_38_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 75.86542415618896,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1021,
+      "language": "pick up the darkcolored rounded dish situated between the flatbased dish for main meals and the small dish typically used for serving sauces then place it onto the flatbased dish for main meals",
+      "bddl_file": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_language_42_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 75.20399475097656,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1312,
+      "language": "lift the darkcolored dish located beside the flat dish used for serving food and set it upon the flat dish",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate_language_33_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 72.3855493068695,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1005,
+      "language": "for better table organization would you pick up the black bowl between the plate and ramekin and move it to the plate",
+      "bddl_file": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_language_24_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 72.05424547195435,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1359,
+      "language": "as part of setting the table please retrieve the black bowl from the wooden cabinet and position it on the plate",
+      "bddl_file": "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate_language_35_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 71.67203545570374,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 996,
+      "language": "grasp the darkcolored vessel located between the item for holding a main course and the small dish designed for baking and serving and rest it upon the item designed to hold a main course",
+      "bddl_file": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_language_13_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 68.63114595413208,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1023,
+      "language": "could you place the black bowl onto the plate for me its the one sitting between another plate and a ramekin",
+      "bddl_file": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_language_44_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 68.53654885292053,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1012,
+      "language": "could you move the black bowl thats between the plate and the ramekin onto the plate for me",
+      "bddl_file": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_language_32_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 62.11097598075867,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1292,
+      "language": "lift the darkhued receptacle located adjacent to the dish and position it atop the dish",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate_language_12_view_0_0_100_0_0_initstate_0.bddl",
+      "category": "Language Instructions",
+      "a800_duration": 58.531386375427246,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 2023,
+      "language": "pick up the black bowl on the ramekin and place it on the plate level3 sample2",
+      "bddl_file": "pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate_level3_sample2.bddl",
+      "category": "Objects Layout",
+      "a800_duration": 104.57054924964905,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 346,
+      "language": "pick up the black bowl from table center and place it on the plate view 0 0 100 0 0 initstate 303",
+      "bddl_file": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_303.bddl",
+      "category": "Robot Initial States",
+      "a800_duration": 97.9138240814209,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 365,
+      "language": "pick up the black bowl on the cookie box and place it on the plate view 0 0 100 0 0 initstate 184",
+      "bddl_file": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_184.bddl",
+      "category": "Robot Initial States",
+      "a800_duration": 89.43267774581909,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 467,
+      "language": "pick up the black bowl next to the cookie box and place it on the plate view 0 0 100 0 0 initstate 247",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_247.bddl",
+      "category": "Robot Initial States",
+      "a800_duration": 88.25161409378052,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 328,
+      "language": "pick up the black bowl from table center and place it on the plate view 0 0 100 0 0 initstate 13",
+      "bddl_file": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_13.bddl",
+      "category": "Robot Initial States",
+      "a800_duration": 86.08165860176086,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 385,
+      "language": "pick up the black bowl on the cookie box and place it on the plate view 0 0 100 0 0 initstate 484",
+      "bddl_file": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_484.bddl",
+      "category": "Robot Initial States",
+      "a800_duration": 85.10294556617737,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 334,
+      "language": "pick up the black bowl from table center and place it on the plate view 0 0 100 0 0 initstate 133",
+      "bddl_file": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_133.bddl",
+      "category": "Robot Initial States",
+      "a800_duration": 80.3059356212616,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 264,
+      "language": "pick up the black bowl between the plate and the ramekin and place it on the plate view 0 0 100 0 0 initstate 151",
+      "bddl_file": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_151.bddl",
+      "category": "Robot Initial States",
+      "a800_duration": 73.96032309532166,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 364,
+      "language": "pick up the black bowl on the cookie box and place it on the plate view 0 0 100 0 0 initstate 164",
+      "bddl_file": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_164.bddl",
+      "category": "Robot Initial States",
+      "a800_duration": 72.5433976650238,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 287,
+      "language": "pick up the black bowl between the plate and the ramekin and place it on the plate view 0 0 100 0 0 initstate 471",
+      "bddl_file": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_471.bddl",
+      "category": "Robot Initial States",
+      "a800_duration": 69.01940369606018,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1490,
+      "language": "pick up the black bowl on the cookie box and place it on the plate view 0 0 100 0 0 initstate 0 noise 28",
+      "bddl_file": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_0_noise_28.bddl",
+      "category": "Sensor Noise",
+      "a800_duration": 97.76712322235107,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1455,
+      "language": "pick up the black bowl from table center and place it on the plate view 0 0 100 0 0 initstate 0 noise 19",
+      "bddl_file": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_0_noise_19.bddl",
+      "category": "Sensor Noise",
+      "a800_duration": 95.25855350494385,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1387,
+      "language": "pick up the black bowl between the plate and the ramekin and place it on the plate view 0 0 100 0 0 initstate 0 noise 17",
+      "bddl_file": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_0_noise_17.bddl",
+      "category": "Sensor Noise",
+      "a800_duration": 81.19067716598511,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1395,
+      "language": "pick up the black bowl between the plate and the ramekin and place it on the plate view 0 0 100 0 0 initstate 0 noise 38",
+      "bddl_file": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_0_noise_38.bddl",
+      "category": "Sensor Noise",
+      "a800_duration": 72.71539306640625,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1427,
+      "language": "pick up the black bowl next to the ramekin and place it on the plate view 0 0 100 0 0 initstate 0 noise 33",
+      "bddl_file": "pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_0_noise_33.bddl",
+      "category": "Sensor Noise",
+      "a800_duration": 68.66620659828186,
+      "duration_source": "legacy_runtime_proxy"
+    },
+    {
+      "suite": "libero_spatial",
+      "task_id": 1396,
+      "language": "pick up the black bowl between the plate and the ramekin and place it on the plate view 0 0 100 0 0 initstate 0 noise 39",
+      "bddl_file": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_view_0_0_100_0_0_initstate_0_noise_39.bddl",
+      "category": "Sensor Noise",
+      "a800_duration": 62.71813178062439,
+      "duration_source": "legacy_runtime_proxy"
+    }
+  ],
+  "selection": "unfinished remaining3 tail rebalance",
+  "prior_result_sources": [
+    {
+      "host": "manipulation",
+      "directory": "/mnt/data/cfy/FastWAM/evaluate_results/libero_plus/libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4/ckpt021700_vaeDecoderStep7498_replan8_ensembleOff_robustJointAnchor0_remaining3_manipulation_20260914",
+      "completed": 2694
+    },
+    {
+      "host": "nav",
+      "directory": "/mnt/data/cfy/FastWAM/evaluate_results/libero_plus/libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4/ckpt021700_vaeDecoderStep7498_replan8_ensembleOff_robustJointAnchor0_remaining3_nav_20260914",
+      "completed": 2646
+    }
+  ],
+  "completed_before_rebalance_count": 5340,
+  "completed_ids_sha256": "77e826f64cd17fc494ceb138b18f56b39557146dc7c6b4ab1be76452bfac520a"
+}
