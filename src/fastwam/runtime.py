@@ -546,6 +546,15 @@ def run_training(cfg: DictConfig):
     mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
     model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
     model = instantiate(cfg.model, model_dtype=model_dtype, device=model_device)
+    # Weight-only fine-tuning must precede optimizer/ZeRO master-weight creation.
+    # A subsequent full-state resume takes precedence over this initialization.
+    init_weights = cfg.get("init_weights")
+    if init_weights and not cfg.get("resume"):
+        init_path = Path(str(init_weights))
+        if not init_path.is_file():
+            raise FileNotFoundError(f"Initial weight checkpoint not found: {init_path}")
+        logger.info("Initializing model weights before optimizer creation: %s", init_path)
+        model.load_checkpoint(str(init_path), optimizer=None)
     train_ds, val_ds = build_datasets(cfg.data)
     _validate_visual_action_data_contract(model, train_ds, val_ds)
     if getattr(model, "is_visual_action_model", False):

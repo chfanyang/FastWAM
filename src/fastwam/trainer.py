@@ -1,4 +1,5 @@
 import logging
+import copy
 import json
 import hashlib
 import inspect
@@ -329,12 +330,21 @@ class Wan22Trainer:
                 if cfg.get("max_steps") is not None or int(interval) <= 0:
                     raise ValueError(f"{option} requires max_steps=null and a positive epoch interval")
                 setattr(self, attribute, (total_train_steps // self.num_epochs) * int(interval))
-        warmup_steps = int(total_train_steps * self.warmup_ratio)
+        restart = cfg.get("continuation_schedule")
+        schedule_steps = total_train_steps
+        if restart:
+            schedule_steps = total_train_steps - int(restart.start_step)
+            if schedule_steps <= 0:
+                raise ValueError("Continuation must extend beyond start_step")
+        schedule_options = restart or cfg.get("lr_schedule_options")
+        warmup_steps = int(schedule_options.warmup_steps) if schedule_options else int(total_train_steps * self.warmup_ratio)
         self.scheduler = self._build_scheduler(
             scheduler_type=cfg.lr_scheduler_type,
-            total_train_steps=total_train_steps,
+            total_train_steps=schedule_steps,
             warmup_steps=warmup_steps,
         )
+        initial_schedule_state = copy.deepcopy(self.scheduler.state_dict()) if restart else None
+        initial_schedule_lrs = self.scheduler.get_last_lr() if restart else None
         self.global_step = 0
         self.epoch = 0
         self.batch_in_epoch = 0
@@ -357,6 +367,16 @@ class Wan22Trainer:
         self.wandb_run = None
         self._init_wandb()
         self._resume_or_load_checkpoint()
+        # Restart only when loading the explicitly designated original state.
+        # Resuming a checkpoint produced by this continuation must keep its LR progress.
+        if restart and self.resume and Path(str(self.resume)).resolve() == Path(str(restart.source_state)).resolve():
+            if self.global_step != int(restart.start_step):
+                raise ValueError("Continuation source step does not match start_step")
+            self.scheduler.load_state_dict(initial_schedule_state)
+            for group, lr in zip(self.optimizer.param_groups, initial_schedule_lrs):
+                group["lr"] = lr
+                group["initial_lr"] = self.learning_rate
+            logger.info("Continuation restored optimizer history at step=%d; restarted schedule for %d updates, initial_lr=%g peak_lr=%g", self.global_step, schedule_steps, initial_schedule_lrs[0], self.learning_rate)
 
         val_size = len(self.val_dataset) if self.val_dataset is not None else len(self.train_dataset)
         logger.info("Train/val dataset size: %d/%d", len(self.train_dataset), val_size)
@@ -462,11 +482,12 @@ class Wan22Trainer:
         warmup_steps = min(max(int(warmup_steps), 0), total_train_steps - 1)
 
         remaining_steps = max(total_train_steps - warmup_steps, 1)
+        schedule_options = self.cfg.get("continuation_schedule") or self.cfg.get("lr_schedule_options")
         if scheduler_type == "cosine":
             main_scheduler = CosineAnnealingLR(
                 self.optimizer,
                 T_max=remaining_steps,
-                eta_min=self.learning_rate * 0.01,
+                eta_min=(float(schedule_options.min_lr) if schedule_options else self.learning_rate * 0.01),
             )
         elif scheduler_type == "constant":
             main_scheduler = ConstantLR(self.optimizer, factor=1.0, total_iters=remaining_steps)
@@ -481,7 +502,7 @@ class Wan22Trainer:
 
         warmup_scheduler = LinearLR(
             self.optimizer,
-            start_factor=1.0 / warmup_steps,
+            start_factor=(float(schedule_options.start_lr) / self.learning_rate if schedule_options else 1.0 / warmup_steps),
             end_factor=1.0,
             total_iters=warmup_steps,
         )
@@ -1313,6 +1334,10 @@ class Wan22Trainer:
             "finetune": cfg.get("finetune"),
             "world_size": int(self.accelerator.num_processes),
         }
+        if cfg.get("continuation_schedule"):
+            semantic["continuation_schedule"] = cfg["continuation_schedule"]
+        if cfg.get("lr_schedule_options"):
+            semantic["lr_schedule_options"] = cfg["lr_schedule_options"]
         encoded = json.dumps(
             semantic,
             sort_keys=True,
@@ -1464,6 +1489,12 @@ class Wan22Trainer:
                         if isinstance(value, (int, float))
                     },
                 )
+
+                self._wandb_log({
+                    f"eval/{key}": float(value)
+                    for key, value in metrics.items()
+                    if isinstance(value, (int, float))
+                })
 
         while self.global_step < self.max_steps:
             try:

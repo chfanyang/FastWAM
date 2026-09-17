@@ -1,0 +1,39 @@
+# @package _global_
+defaults:
+  - override /data: libero_rothko_2cam224
+  - override /model: fastwam_video_only_libero_rothko
+  - _self_
+
+output_dir: ./runs/libero_all4_rothko_2cam224_full_from21700_ep2_1e-4/${now:%Y-%m-%d}_${now:%H-%M-%S}
+# Weight-only initialization; fresh AdamW and fresh warmup/cosine schedule.
+init_weights: /mnt/hwdata/cfy/FastWAM/runs/libero_all4_rothko_2cam224_full_1e-4/2026-08-04_15-32-37/checkpoints/weights/step_021700.pt
+resume: null
+batch_size: 8
+gradient_accumulation_steps: 2
+num_workers: 8
+learning_rate: 1.0e-4
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+num_epochs: 2
+max_steps: null
+log_every: 10
+save_every: 1085
+state_save_every: 2170
+eval_every: 500
+eval_num_inference_steps: 20
+eval_sample_index: 0
+eval_num_samples: 4
+eval_random_seed: 42
+data:
+  train:
+    pretrained_norm_stats: /mnt/hwdata/cfy/FastWAM/runs/libero_all4_rothko_2cam224_full_1e-4/2026-08-04_15-32-37/dataset_stats.json
+finetune:
+  method: full
+  train_proprio_encoder: false
+wandb:
+  enabled: true
+  project: fast-wam
+  name: libero_all4_rothko_2cam224_full_from21700_ep2_1e-4
+  group: libero_all4_rothko
+  mode: online
