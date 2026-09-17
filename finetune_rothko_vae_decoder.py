@@ -757,6 +757,17 @@ def masked_l1(reconstruction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
     return (reconstruction - target).abs()[..., mask].mean()
 
 
+def gradient_clip_metrics(total_norm: Tensor, max_norm: float) -> dict[str, Tensor]:
+    """Observe clip_grad_norm_'s returned pre-clip norm; never modify gradients."""
+    norm = total_norm.detach().float()
+    scale = (float(max_norm) / (norm + 1e-6)).clamp(max=1.0)
+    return {
+        "grad_norm_pre_clip": norm,
+        "grad_clip_fraction": (scale < 1.0).float(),
+        "grad_clip_scale": scale,
+    }
+
+
 def compute_reconstruction_loss(
     reconstruction: Tensor,
     target: Tensor,
@@ -892,6 +903,24 @@ def save_checkpoint(
     temporary = path + ".tmp"
     torch.save(payload, temporary)
     os.replace(temporary, path)
+
+
+def save_independent_full_checkpoint(output_dir, vae, optimizer, scheduler, step, metadata):
+    """Keep every full recovery point; latest is only an atomic relative symlink."""
+    directory = Path(output_dir)
+    path = directory / f"checkpoint_step{step:06d}_full.pt"
+    if path.exists():
+        raise FileExistsError(f"Refusing to overwrite recovery point: {path}")
+    save_checkpoint(str(path), vae, optimizer, scheduler, step, metadata, include_optimizer=True)
+    temporary_link = directory / ".checkpoint_latest.link.tmp"
+    os.symlink(path.name, temporary_link)
+    os.replace(temporary_link, directory / "checkpoint_latest.pt")
+    return path
+
+
+def independent_checkpoint_events(step, max_steps, save_every, eval_every):
+    return (step % save_every == 0 or step == max_steps,
+            step % eval_every == 0 or step == max_steps)
 
 
 def load_checkpoint(
@@ -1192,6 +1221,8 @@ def train(args: argparse.Namespace) -> None:
         if args.warmup_steps is not None
         else min(int(args.max_steps * args.warmup_ratio), args.max_steps - 1)
     )
+    if getattr(args, "cached_decoder_training", False):
+        warmup_steps = args.warmup_steps
     scheduler = build_scheduler(
         optimizer, args.max_steps, warmup_steps, args.min_lr_ratio, args.lr_scheduler
     )
@@ -1207,6 +1238,17 @@ def train(args: argparse.Namespace) -> None:
             scheduler,
             allow_weights_only_resume=args.allow_weights_only_resume,
         )
+        branch_lr = getattr(args, "resume_constant_lr", None)
+        if branch_lr is not None:
+            if not optimizer_state_restored:
+                raise ValueError("Constant LR branch requires restored Adam state")
+            for group in optimizer.param_groups:
+                group["lr"] = float(branch_lr)
+                group["initial_lr"] = float(branch_lr)
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+            scheduler.last_epoch = step
+            scheduler._step_count = step + 1
+            log(f"LR branch: constant {branch_lr:.8e}; no warmup; Adam retained", rank)
         current_lr = float(optimizer.param_groups[0]["lr"])
         resume_kind = "full optimizer" if optimizer_state_restored else "WEIGHTS ONLY; Adam reset"
         log(
@@ -1215,6 +1257,27 @@ def train(args: argparse.Namespace) -> None:
             rank,
         )
     barrier(is_distributed)
+
+    # Opt-in bounded continuation experiments; ordinary resume is unchanged.
+    continuation_steps = int(getattr(args, "continuation_steps", 0))
+    continuation_start = step
+    if continuation_steps:
+        if not resume_path or not optimizer_state_restored:
+            raise ValueError("Bounded continuation requires a full optimizer resume")
+        args.max_steps = step + continuation_steps
+        start_lr = float(getattr(args, "continuation_start_lr", 1e-7))
+        ramp_steps = int(getattr(args, "continuation_warmup_steps", 50))
+        if continuation_steps < 1 or ramp_steps < 1 or not 0 < start_lr <= args.lr:
+            raise ValueError("Invalid continuation LR/step settings")
+        for group in optimizer.param_groups:
+            group["lr"] = args.lr
+            group["initial_lr"] = args.lr
+        ratio = start_lr / args.lr
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lambda update: ratio + (1.0 - ratio) * min(update / ramp_steps, 1.0)
+        )
+        log(f"Continuation: {step}->{args.max_steps}; LR {start_lr:.3e}->{args.lr:.3e} "
+            f"over {ramp_steps} steps, then constant; Adam state retained", rank)
 
     runtime_config = {
         "command": shlex.join([sys.executable, *sys.argv]),
@@ -1329,6 +1392,11 @@ def train(args: argparse.Namespace) -> None:
                 epoch_window_refs.extend(epoch_window_refs[:padding])
             cached_epoch_index = epoch_index
             log(f"Starting epoch {epoch_index + 1}/{args.epochs}", rank)
+            if getattr(args, "cached_prefetch", False):
+                prefetched_batches = cached_epoch_batches(
+                    epoch_window_refs, step_in_epoch, steps_per_epoch,
+                    effective_batch_size, world_size, rank, device,
+                )
         optimizer.zero_grad(set_to_none=True)
         step_values = defaultdict(float)
         for accumulation_index in range(grad_accum):
@@ -1339,10 +1407,16 @@ def train(args: argparse.Namespace) -> None:
                 + rank * args.batch_size
             )
             refs = epoch_window_refs[offset : offset + args.batch_size]
-            windows = materialize_windows(store, refs, args.action_horizon)
-            targets, _ = build_target_batch(windows, stats, device, dtype, args)
-            with torch.no_grad(), autocast_context(device, args.bf16):
-                latents = vae_encode(vae.model, targets, vae.scale)
+            if getattr(args, "cached_prefetch", False):
+                targets, latents = next(prefetched_batches)
+            elif getattr(args, "cached_decoder_training", False):
+                windows = materialize_windows(store, refs, args.action_horizon)
+                targets, latents = cached_training_batch(windows, refs, device)
+            else:
+                windows = materialize_windows(store, refs, args.action_horizon)
+                targets, _ = build_target_batch(windows, stats, device, dtype, args)
+                with torch.no_grad(), autocast_context(device, args.bf16):
+                    latents = vae_encode(vae.model, targets, vae.scale)
             sync_context = contextlib.nullcontext()
             if is_distributed and accumulation_index < grad_accum - 1:
                 sync_context = ddp_wrapper.no_sync()
@@ -1355,34 +1429,54 @@ def train(args: argparse.Namespace) -> None:
                     reconstruction.float(), targets.float(), masks, args
                 )
                 (loss / grad_accum).backward()
-            step_values["loss"] += float(loss) / grad_accum
+            step_values["loss"] += (loss.detach() if getattr(args, "cached_prefetch", False) else float(loss)) / grad_accum
             for key, value in components.items():
-                step_values[key] += float(value) / grad_accum
+                step_values[key] += (value.detach() if getattr(args, "cached_prefetch", False) else float(value)) / grad_accum
             del targets, latents, reconstruction, loss, components
         if args.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(trainable, args.grad_clip)
+            pre_clip_norm = torch.nn.utils.clip_grad_norm_(trainable, args.grad_clip)
+            for key, value in gradient_clip_metrics(pre_clip_norm, args.grad_clip).items():
+                step_values[key] = value if getattr(args, "cached_prefetch", False) else float(value)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         if scheduler is not None:
             scheduler.step()
         step += 1
+        interval_step = step - continuation_start if continuation_steps else step
         completed_epochs = step / steps_per_epoch
         epoch_completed = step % steps_per_epoch == 0
         _CHECKPOINT_STATE["step"] = step
+        # Each local value already averages the accumulated micro-batches.
+        # Equal per-rank batches permit a mean across ranks for global-batch loss.
+        if getattr(args, "cached_decoder_training", False) and is_distributed:
+            metric_keys = sorted(step_values)
+            if getattr(args, "cached_prefetch", False):
+                reduced = torch.stack([step_values[k] for k in metric_keys]).double()
+            else:
+                reduced = torch.tensor([step_values[k] for k in metric_keys], device=device, dtype=torch.float64)
+            dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+            reduced /= world_size
+            step_values = dict(zip(metric_keys, reduced.cpu().tolist()))
         for key, value in step_values.items():
             running[key] += value
         log_count += 1
         progress.update(1)
 
-        if step % args.log_every == 0:
+        if interval_step % args.log_every == 0:
             averages = {key: value / log_count for key, value in running.items()}
             current_lr = float(optimizer.param_groups[0]["lr"])
+            clip_log = (
+                f" grad_norm_pre_clip={averages['grad_norm_pre_clip']:.6f}"
+                f" grad_clip_fraction={averages['grad_clip_fraction']:.3f}"
+                f" grad_clip_scale={averages['grad_clip_scale']:.6f}"
+                if "grad_norm_pre_clip" in averages else ""
+            )
             log(
                 f"step {step}/{args.max_steps} loss={averages['loss']:.6f} "
                 f"center={averages['center']:.6f} direction={averages['direction']:.6f} "
                 f"gripper={averages['gripper']:.6f} lr={current_lr:.2e} "
                 f"epoch={completed_epochs:.4f}/{args.epochs} "
-                f"elapsed={time.time() - started:.1f}s", rank,
+                f"elapsed={time.time() - started:.1f}s{clip_log}", rank,
             )
             if wandb_run is not None:
                 wandb_run.log(
@@ -1393,25 +1487,53 @@ def train(args: argparse.Namespace) -> None:
                         "train/gripper_loss": averages["gripper"],
                         "train/learning_rate": current_lr,
                         "train/epoch": completed_epochs,
+                        "train/optimizer_step": step,
+                        "train/effective_batch_size": effective_batch_size,
+                        "train/log_window_optimizer_steps": log_count,
+                        **{f"train/{key}": averages[key] for key in (
+                            "grad_norm_pre_clip", "grad_clip_fraction", "grad_clip_scale"
+                        ) if key in averages},
                     },
                     step=step,
                 )
             running.clear()
             log_count = 0
 
-        if step % args.save_every == 0 or epoch_completed or step == args.max_steps:
+        eval_due = interval_step % args.eval_every == 0 or epoch_completed or step == args.max_steps
+        independent_full = getattr(args, "independent_full_checkpoints", False)
+        if independent_full:
+            full_due, eval_due = independent_checkpoint_events(step, args.max_steps, args.save_every, args.eval_every)
+            if step in getattr(args, "extra_full_eval_steps", ()):
+                full_due = eval_due = True
+            if full_due and optimizer_is_sharded:
+                optimizer.consolidate_state_dict(to=0)
+            if rank == 0:
+                if full_due:
+                    saved = save_independent_full_checkpoint(args.output_dir, vae, optimizer, scheduler, step, metadata)
+                    log(f"Saved independent FULL recovery checkpoint: {saved}", rank)
+                    if optimizer_is_sharded:
+                        optimizer._all_state_dicts.clear()
+                if eval_due:
+                    _, vae_export_name = VAE_VARIANTS[args.vae_variant]
+                    export_path = str(Path(args.output_dir) / f"{vae_export_name}_libero_rothko_step{step:06d}.safetensors")
+                    export_complete_vae(export_path, vae, step, metadata)
+                    log(f"Exported BF16 evaluation weights: {export_path}", rank)
+            if full_due or eval_due:
+                barrier(is_distributed)
+        cached_eval_save = getattr(args, "cached_decoder_training", False) and eval_due
+        if not independent_full and (interval_step % args.save_every == 0 or epoch_completed or step == args.max_steps or cached_eval_save):
             if optimizer_is_sharded:
                 optimizer.consolidate_state_dict(to=0)
             if rank == 0:
                 save_checkpoint(latest_path, vae, optimizer, scheduler, step, metadata)
                 if args.save_step_checkpoints and (
-                    step % args.step_checkpoint_every == 0 or step == args.max_steps
+                    interval_step % args.step_checkpoint_every == 0 or step == args.max_steps or cached_eval_save
                 ):
                     save_checkpoint(
                         str(Path(args.output_dir) / f"checkpoint_step{step:06d}.pt"),
                         vae, None, scheduler, step, metadata, include_optimizer=False,
                     )
-                if step % args.export_every == 0:
+                if interval_step % args.export_every == 0 or cached_eval_save:
                     _, vae_export_name = VAE_VARIANTS[args.vae_variant]
                     periodic_export_path = str(
                         Path(args.output_dir)
@@ -1423,10 +1545,13 @@ def train(args: argparse.Namespace) -> None:
                     optimizer._all_state_dicts.clear()
             barrier(is_distributed)
 
-        if step % args.eval_every == 0 or epoch_completed or step == args.max_steps:
+        if eval_due:
             barrier(is_distributed)
-            if rank == 0:
+            if getattr(args, "parallel_cached_eval", False):
                 result = evaluate(vae, store, eval_episodes, stats, args, device, dtype)
+            if rank == 0:
+                if not getattr(args, "parallel_cached_eval", False):
+                    result = evaluate(vae, store, eval_episodes, stats, args, device, dtype)
                 path = Path(args.output_dir) / f"eval_step{step:06d}.json"
                 with open(path, "w", encoding="utf-8") as handle:
                     json.dump(result, handle, indent=2)
@@ -1454,7 +1579,8 @@ def train(args: argparse.Namespace) -> None:
             Path(args.output_dir)
             / f"{vae_export_name}_libero_rothko_step{step:06d}.safetensors"
         )
-        export_complete_vae(export_path, vae, step, metadata)
+        if not (getattr(args, "independent_full_checkpoints", False) and Path(export_path).is_file()):
+            export_complete_vae(export_path, vae, step, metadata)
         log(f"Exported complete FastWAM-loadable VAE: {export_path}", rank)
         if wandb_run is not None:
             wandb_run.summary["export_safetensors"] = export_path
