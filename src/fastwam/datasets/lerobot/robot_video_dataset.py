@@ -230,7 +230,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         )
         if (
             self.libero_action_gripper_key is not None
-            and raymap_representation != "libero_rothko"
+            and raymap_representation not in {"libero_rothko", "libero_rothko_all_absolute"}
         ):
             raise ValueError(
                 "`libero_action_gripper_key` is only valid with "
@@ -238,10 +238,10 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             )
         self.raymap_codec = None
         if raymap_representation is not None:
-            if raymap_representation not in ("rothko", "libero_rothko"):
+            if raymap_representation not in ("rothko", "libero_rothko", "libero_rothko_all_absolute"):
                 raise ValueError(
                     "`raymap_representation` must be one of "
-                    "['rothko', 'libero_rothko'], "
+                    "['rothko', 'libero_rothko', 'libero_rothko_all_absolute'], "
                     f"got {raymap_representation!r}."
                 )
             if action_video_freq_ratio != 1:
@@ -280,7 +280,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                     **rothko_config,
                 }
                 codec_config = LiberoRothkoCodecConfig(**codec_config_kwargs)
-                self.raymap_codec = LiberoRothkoCodec(
+                codec_class = LiberoRothkoCodec
+                if raymap_representation == "libero_rothko_all_absolute":
+                    from fastwam.representations.libero_rothko_all_absolute import LiberoAllAbsoluteRothkoCodec
+                    codec_class = LiberoAllAbsoluteRothkoCodec
+                self.raymap_codec = codec_class(
                     config=codec_config,
                     norm_stats=rothko_norm_stats,
                     expected_action_horizon=self.num_frames - 1,
@@ -421,7 +425,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 left_wrist=video[1],
                 right_wrist=video[2],
             )
-        elif self.raymap_representation == "libero_rothko":
+        elif self.raymap_representation in {"libero_rothko", "libero_rothko_all_absolute"}:
             if num_cameras != 2 or self.concat_multi_camera != "horizontal":
                 raise ValueError(
                     "LIBERO Rothko requires two horizontally concatenated cameras, "
@@ -448,7 +452,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
 
         if (
             self.concat_multi_camera != "robotwin"
-            and self.raymap_representation != "libero_rothko"
+            and self.raymap_representation not in {"libero_rothko", "libero_rothko_all_absolute"}
         ):
             # The shared RoboTwin builder already returns the exact target
             # shape and applies the same [-1, 1] normalization.

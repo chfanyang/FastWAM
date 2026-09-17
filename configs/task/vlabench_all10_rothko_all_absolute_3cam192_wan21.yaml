@@ -1,0 +1,22 @@
+# @package _global_
+defaults:
+  - vlabench_select_book_rothko_all_absolute_3cam192_wan21
+  - _self_
+output_dir: ./runs/vlabench_all10_rothko_all_absolute_3cam192_wan21/${now:%Y-%m-%d}_${now:%H-%M-%S}
+data:
+  train:
+    _target_: fastwam.datasets.vlabench_multitask_cached.VLABenchMultitaskCachedDataset
+    cache_index_path: ./evaluate_results/vlabench/cache_all10_absolute_20260916_235830/cache_index.json
+    latent_cache_dir: null
+    task_names: null
+  val:
+    _target_: fastwam.datasets.vlabench_video.VLABenchVideoDataset
+    cache_scope: full_split
+    task_names: null
+num_epochs: 10
+save_every_epochs: 1
+state_save_every_epochs: 1
+eval_every: 1000
+eval_sample_manifest: ./data/vlabench_primitive_ft_lerobot/manifests/validation_windows_10task_20samples_seed42.json
+wandb:
+  name: vlabench_all10_rothko_all_absolute_3cam192_wan21

@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - vlabench_select_book_rothko_3cam192_wan21
+  - _self_
+
+output_dir: ./runs/vlabench_select_book_rothko_absolute_ray0_3cam192_wan21/${now:%Y-%m-%d}_${now:%H-%M-%S}
+data:
+  train:
+    latent_cache_dir: ./data/vlabench_select_book_rothko_absolute_ray0_3cam192_wan21_bf16_h16_latents
+    rothko_config:
+      frame0_pose_mode: absolute
+      absolute_position_min: [-0.4098355567455292, 0.16170487344264983, 0.2925408685207367]
+      absolute_position_max: [0.3646942472457886, 0.711363742351532, 0.482888320684433]
+wandb:
+  name: vlabench_select_book_rothko_absolute_ray0_3cam192_wan21

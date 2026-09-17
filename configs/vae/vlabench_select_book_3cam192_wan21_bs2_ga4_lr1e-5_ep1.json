@@ -1,0 +1,23 @@
+{
+  "train_config": "runs/vlabench_select_book_rothko_3cam192_wan21/2026-09-15_17-33-31/config.yaml",
+  "base_vae": "checkpoints/Wan-AI/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth",
+  "output_dir": "runs/vlabench_select_book_vae_wan21_3cam192_bs2_ga4_lr1e-5_ep1",
+  "epochs": 1,
+  "batch_size": 2,
+  "grad_accum_steps": 4,
+  "lr": 1e-5,
+  "warmup_ratio": 0.05,
+  "min_lr_ratio": 0.01,
+  "weight_decay": 0.0,
+  "grad_clip": 1.0,
+  "center_loss_weight": 1.0,
+  "direction_loss_weight": 1.0,
+  "gripper_loss_weight": 1.0,
+  "num_workers": 2,
+  "seed": 42,
+  "eval_every": 100,
+  "save_every": 200,
+  "log_every": 10,
+  "wandb": true,
+  "wandb_project": "fast-wam"
+}

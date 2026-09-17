@@ -362,9 +362,29 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                 decode_anchor_alpha=rothko_decode_anchor_alpha,
                 decode_block_grid=rothko_decode_block_grid,
             )
-        elif self.raymap_representation == "libero_rothko":
-            self.raymap_codec = LiberoRothkoCodec(
+        elif self.raymap_representation in {"libero_rothko", "libero_rothko_all_absolute"}:
+            codec_class = LiberoRothkoCodec
+            if self.raymap_representation == "libero_rothko_all_absolute":
+                from fastwam.representations.libero_rothko_all_absolute import LiberoAllAbsoluteRothkoCodec
+                codec_class = LiberoAllAbsoluteRothkoCodec
+            self.raymap_codec = codec_class(
                 config=LiberoRothkoCodecConfig(**codec_payload),
+                norm_stats=rothko_norm_stats,
+                expected_action_horizon=self.action_horizon,
+                decode_mode=rothko_decode_mode,
+                decode_anchor_alpha=rothko_decode_anchor_alpha,
+                decode_block_grid=rothko_decode_block_grid,
+            )
+        elif self.raymap_representation in {"vlabench_rothko", "vlabench_rothko_all_absolute"}:
+            from fastwam.representations.vlabench_rothko import (
+                VLABenchRothkoCodec, VLABenchRothkoCodecConfig,
+            )
+            codec_class = VLABenchRothkoCodec
+            if self.raymap_representation == "vlabench_rothko_all_absolute":
+                from fastwam.representations.vlabench_rothko_all_absolute import VLABenchAllAbsoluteRothkoCodec
+                codec_class = VLABenchAllAbsoluteRothkoCodec
+            self.raymap_codec = codec_class(
+                config=VLABenchRothkoCodecConfig(**codec_payload),
                 norm_stats=rothko_norm_stats,
                 expected_action_horizon=self.action_horizon,
                 decode_mode=rothko_decode_mode,
@@ -373,7 +393,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             )
         else:
             raise ValueError(
-                "`raymap_representation` must be 'rothko' or 'libero_rothko', "
+                "`raymap_representation` must be 'rothko', 'libero_rothko', 'libero_rothko_all_absolute', 'vlabench_rothko' or 'vlabench_rothko_all_absolute', "
                 f"got {self.raymap_representation!r}."
             )
         # Decoding is an inference-time policy choice, not part of the learned
@@ -593,7 +613,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
         if getattr(self.raymap_codec, "_decode_anchor_raw", None) is not None:
             return
         time = self.num_pixel_frames
-        if self.raymap_representation == "libero_rothko":
+        if self.raymap_representation in {"libero_rothko", "vlabench_rothko"}:
             pose = torch.zeros(1, time, 7, device=self.device, dtype=torch.float32)
             pose[..., 3] = 1.0
             gripper = torch.full(

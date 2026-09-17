@@ -1,0 +1,54 @@
+# @package _global_
+defaults:
+  - override /data: libero_rothko_2cam224
+  - override /model: fastwam_video_only_libero_rothko_wan21_1_3b
+  - _self_
+
+output_dir: ./runs/libero_goal_rothko_absolute_ray0_2cam224_full_wan21_1_3b_1e-4/${now:%Y-%m-%d}_${now:%H-%M-%S}
+data:
+  train:
+    dataset_dirs:
+      - ./data/libero_mujoco3.3.2/libero_goal_no_noops_lerobot
+    latent_cache_dir: ./data/libero_goal_rothko_absolute_ray0_wan21_bf16_h16_latents
+    latent_cache_only: true
+    rothko_config:
+      frame0_pose_mode: absolute
+      # Exact all-four-suite observation min/max, no window subsampling.
+      # Audit: data/libero_mujoco3.3.2/libero_absolute_ray0_all4_minmax_v1.json
+      absolute_position_min: [-0.48278069496154785, -0.3309336006641388, 0.008128181099891663]
+      absolute_position_max: [0.2103137969970703, 0.3904264271259308, 1.472778081893921]
+
+# Same effective batch64 as the old 4-GPU Goal run: 4 x 8 x 2.
+batch_size: 4
+num_workers: 8
+gradient_accumulation_steps: 2
+lr_scheduler_type: cosine
+learning_rate: 1.0e-4
+num_epochs: 10
+max_steps: null
+log_every: 10
+save_every: 2000
+eval_every: 500
+eval_num_inference_steps: 20
+eval_sample_index: 0
+eval_num_samples: 4
+eval_random_seed: 42
+weight_decay: 1.0e-2
+resume: null
+
+# Original pretrained Wan2.1 T2V 1.3B + original frozen Wan2.1 VAE. Only this experiment's
+# separately verified absolute-RAY0 cache is used; validation retains image inputs.
+model:
+  video_dit_config:
+    use_gradient_checkpointing: false
+
+finetune:
+  method: full
+  train_proprio_encoder: false
+wandb:
+  enabled: true
+  workspace: null
+  project: fast-wam
+  name: libero_goal_rothko_absolute_ray0_2cam224_full_wan21_1_3b_1e-4
+  group: libero_goal_rothko_absolute_ray0
+  mode: online

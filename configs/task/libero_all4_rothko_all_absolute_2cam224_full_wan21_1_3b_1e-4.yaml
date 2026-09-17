@@ -1,0 +1,26 @@
+# @package _global_
+# Opt-in all-absolute experiment; old relative and mixed configs remain unchanged.
+defaults:
+  - libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4
+  - _self_
+output_dir: ./runs/libero_all4_rothko_all_absolute_2cam224_wan21/${now:%Y-%m-%d}_${now:%H-%M-%S}
+data:
+  train:
+    raymap_representation: libero_rothko_all_absolute
+    rothko_norm_stats: ./data/libero_mujoco3.3.2/libero_all4_rothko_all_absolute_minmax_margin01_h16_224x448_centerfrac05.pt
+    latent_cache_dir: ./data/libero_all4_rothko_all_absolute_2cam224_wan21_bf16_h16_latents
+    sample_error_mode: raise
+    rothko_config:
+      frame0_pose_mode: absolute
+      absolute_position_min: [-0.5335030651092529, -0.3409336006641388, -0.046871816962957384]
+      absolute_position_max: [0.22031379699707032, 0.4038860297203064, 1.4955892658233643]
+model:
+  raymap_representation: ${data.train.raymap_representation}
+  vae_safetensors_path: null
+  rothko_decode_mode: legacy
+  rothko_decode_anchor_alpha: 0.0
+# Draft 8-GPU effective batch128; formal launch parameters require confirmation.
+batch_size: 4
+gradient_accumulation_steps: 4
+wandb:
+  name: libero_all4_rothko_all_absolute_2cam224_wan21

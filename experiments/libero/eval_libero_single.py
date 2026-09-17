@@ -185,7 +185,7 @@ def _obs_to_model_input(
     num_cameras = processor.num_output_cameras
     is_visual_action = (
         str(cfg.data.train.get("raymap_representation", ""))
-        == "libero_rothko"
+        in {"libero_rothko", "libero_rothko_all_absolute"}
     )
     if is_visual_action:
         if num_cameras != 2 or concatenation != "horizontal":
@@ -286,7 +286,7 @@ def _extract_gripper_open(obs: dict) -> torch.Tensor:
 def _is_libero_rothko(cfg: DictConfig) -> bool:
     return (
         str(cfg.data.train.get("raymap_representation", ""))
-        == "libero_rothko"
+        in {"libero_rothko", "libero_rothko_all_absolute"}
     )
 
 
@@ -518,7 +518,10 @@ def _predict_action_chunk(
             if cfg.EVALUATION.get("sigma_shift") is None
             else float(cfg.EVALUATION.get("sigma_shift"))
         ),
-        "seed": None if cfg.get("seed") is None else int(cfg.seed),
+        "seed": (
+            None if cfg.EVALUATION.get("inference_seed", cfg.get("seed")) is None
+            else int(cfg.EVALUATION.get("inference_seed", cfg.get("seed")))
+        ),
         "rand_device": str(cfg.EVALUATION.get("rand_device", "cpu")),
         "tiled": bool(cfg.EVALUATION.get("tiled", False)),
     }
@@ -990,6 +993,8 @@ def run_single_task(
 @hydra.main(version_base="1.3", config_path="../../configs", config_name="sim_libero.yaml")
 def eval_single_process(cfg: DictConfig):
     start_time = time.time()
+    logging.info("Evaluation seeds: environment=%s inference=%s",
+                 cfg.get("seed"), cfg.EVALUATION.get("inference_seed", cfg.get("seed")))
     partial_state = PartialState()
     partial_state.config = cfg
 

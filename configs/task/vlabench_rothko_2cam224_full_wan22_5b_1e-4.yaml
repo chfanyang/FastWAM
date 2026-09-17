@@ -1,0 +1,40 @@
+# @package _global_
+defaults:
+  - override /data: vlabench_rothko_2cam224
+  - override /model: fastwam_video_only_vlabench_rothko
+  - _self_
+
+output_dir: ./runs/vlabench_rothko_2cam224_full_wan22_5b_1e-4/${now:%Y-%m-%d}_${now:%H-%M-%S}
+# Proposed formal budget; GPU smoke test must override batch/step intervals.
+# 4 GPUs x batch 8 x GA 4 = effective batch 128.
+batch_size: 8
+num_workers: 8
+gradient_accumulation_steps: 4
+learning_rate: 1.0e-4
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 1.0e-2
+num_epochs: 10
+max_steps: null
+resume: null
+log_every: 10
+save_every: 1000
+save_every_epochs: 3
+state_save_every_epochs: 5
+save_at_end: true
+eval_every: 500
+eval_sample_manifest: ${data.train.dataset_dir}/manifests/validation_windows_10task_20samples_seed42.json
+# With a manifest, its 20 loss / 10 visual records replace the fallback below.
+eval_num_samples: 4
+eval_sample_index: 0
+eval_random_seed: 42
+eval_num_inference_steps: 20
+finetune:
+  method: full
+  train_proprio_encoder: false
+wandb:
+  enabled: true
+  project: fast-wam
+  name: vlabench_rothko_2cam224_full_wan22_5b_1e-4
+  group: vlabench_rothko
+  mode: online

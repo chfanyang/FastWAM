@@ -1,0 +1,25 @@
+# @package _global_
+# Mixed representation: absolute RAY0; all future targets remain chunk-relative.
+# Independent of the full-absolute experiment and its cache.
+defaults:
+  - vlabench_select_book_rothko_absolute_ray0_3cam192_wan21
+  - _self_
+
+output_dir: ./runs/vlabench_select_book_rothko_mixed_all10bounds_3cam192_wan21/${now:%Y-%m-%d}_${now:%H-%M-%S}
+data:
+  train:
+    latent_cache_dir: ./data/vlabench_select_book_rothko_mixed_all10bounds_3cam192_wan21_bf16_h16_latents
+    # Future positions retain the original relative normalization.
+    rothko_norm_stats: ./data/vlabench_primitive_ft_lerobot/norm_stats/vlabench_rothko_q99p95_h16_192x576_centerfrac05_train99.pt
+    pretrained_norm_stats: ./data/vlabench_primitive_ft_lerobot/norm_stats/vlabench_rothko_q99p95_h16_192x576_centerfrac05_train99.json
+    rothko_config:
+      frame0_pose_mode: absolute
+      absolute_position_min: [-0.486968914270401, -0.06711820721626281, -0.023272830285131933]
+      absolute_position_max: [0.4814973866939545, 0.812754819393158, 0.6373460388183594]
+model:
+  raymap_representation: vlabench_rothko
+  vae_safetensors_path: null
+  rothko_decode_mode: legacy
+  rothko_decode_anchor_alpha: 0.0
+wandb:
+  name: vlabench_select_book_rothko_mixed_all10bounds_3cam192_wan21

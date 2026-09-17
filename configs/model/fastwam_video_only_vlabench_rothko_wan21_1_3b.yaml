@@ -1,0 +1,14 @@
+defaults:
+  - fastwam_video_only_vlabench_rothko
+  - _self_
+
+model_id: Wan-AI/Wan2.1-T2V-1.3B
+model_variant: wan2.1-t2v-1.3b
+video_dit_config:
+  in_dim: 16
+  hidden_dim: 1536
+  ffn_dim: 8960
+  out_dim: 16
+  num_heads: 12
+  attn_head_dim: 128
+  num_layers: 30

@@ -1,0 +1,39 @@
+train:
+  _target_: fastwam.datasets.vlabench_video.VLABenchVideoDataset
+  dataset_dir: ./data/vlabench_primitive_ft_lerobot
+  split_manifest: ${data.train.dataset_dir}/manifests/episode_split_val01_seed42.json
+  split: train
+  rothko_norm_stats: ${data.train.dataset_dir}/norm_stats/vlabench_rothko_q99p95_h16_224x448_centerfrac05_train99.pt
+  # Identity sidecar for the shared runtime; no extra action normalization.
+  pretrained_norm_stats: ${data.train.dataset_dir}/norm_stats/vlabench_rothko_q99p95_h16_224x448_centerfrac05_train99.json
+  text_embedding_cache_dir: ./data/text_embeds_cache/vlabench
+  context_len: 128
+  video_size: [224, 448]
+  include_text_context: true
+  episode_cache_size: 2
+  rothko_config:
+    image_height: 224
+    image_width: 448
+    tile_height: 224
+    tile_width: 224
+    focal: 0.2
+    center_scale: 1.0
+    dir_scale: 1.0
+    center_frac: 0.5
+    boundary_margin: 8
+    outer_margin: 8
+    duplicate_horizontal: true
+    frame0_pose_mode: relative
+
+val:
+  _target_: ${data.train._target_}
+  dataset_dir: ${data.train.dataset_dir}
+  split_manifest: ${data.train.split_manifest}
+  split: val
+  rothko_norm_stats: ${data.train.rothko_norm_stats}
+  pretrained_norm_stats: ${data.train.pretrained_norm_stats}
+  text_embedding_cache_dir: ${data.train.text_embedding_cache_dir}
+  context_len: ${data.train.context_len}
+  include_text_context: true
+  episode_cache_size: ${data.train.episode_cache_size}
+  rothko_config: ${data.train.rothko_config}

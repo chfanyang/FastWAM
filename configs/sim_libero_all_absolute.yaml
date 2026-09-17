@@ -1,0 +1,15 @@
+# @package _global_
+# Dedicated opt-in evaluation defaults for the new all-absolute experiment.
+defaults:
+  - sim_libero
+  - override /task: libero_all4_rothko_all_absolute_2cam224_full_wan21_1_3b_1e-4
+  - _self_
+model:
+  vae_safetensors_path: null
+  rothko_decode_mode: legacy
+  rothko_decode_anchor_alpha: 0.0
+EVALUATION:
+  replan_steps: 8
+  num_inference_steps: 20
+  use_action_ensembler: false
+  save_prediction_videos: false

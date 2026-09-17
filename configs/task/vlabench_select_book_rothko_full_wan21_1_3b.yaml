@@ -1,0 +1,23 @@
+# @package _global_
+defaults:
+  - vlabench_rothko_2cam224_full_wan21_1_3b_1e-4
+  - _self_
+output_dir: ./runs/vlabench_select_book_rothko_full_wan21_1_3b/${now:%Y-%m-%d}_${now:%H-%M-%S}
+data:
+  train:
+    task_names: [select_book]
+    latent_cache_dir: ./data/vlabench_train99_rothko_centerfrac05_wan21_bf16_h16_latents
+    latent_cache_only: true
+  val:
+    task_names: [select_book]
+model:
+  video_dit_config:
+    use_gradient_checkpointing: false
+# 8 GPUs x 4 x 4 = 128; unchanged effective batch.
+batch_size: 4
+gradient_accumulation_steps: 4
+num_workers: 4
+num_epochs: 10
+eval_sample_manifest: ./data/vlabench_primitive_ft_lerobot/manifests/validation_windows_select_book_seed42.json
+wandb:
+  name: vlabench_select_book_rothko_full_wan21_1_3b

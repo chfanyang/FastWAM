@@ -1,0 +1,22 @@
+defaults:
+  - vlabench_rothko_2cam224
+  - _self_
+
+train:
+  camera_layout: three_camera_192
+  cache_scope: task
+  task_names: [select_book]
+  video_size: [192, 576]
+  rothko_norm_stats: ${data.train.dataset_dir}/norm_stats/vlabench_rothko_q99p95_h16_192x576_centerfrac05_train99.pt
+  pretrained_norm_stats: ${data.train.dataset_dir}/norm_stats/vlabench_rothko_q99p95_h16_192x576_centerfrac05_train99.json
+  rothko_config:
+    image_height: 192
+    image_width: 576
+    tile_height: 192
+    tile_width: 192
+    horizontal_copies: 3
+val:
+  camera_layout: ${data.train.camera_layout}
+  cache_scope: task
+  task_names: ${data.train.task_names}
+  video_size: ${data.train.video_size}

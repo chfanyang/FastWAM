@@ -1,0 +1,18 @@
+# Text-cache only: do not use this as a training configuration.
+model:
+  model_id: Wan-AI/Wan2.2-TI2V-5B
+  tokenizer_model_id: Wan-AI/Wan2.1-T2V-1.3B
+  redirect_common_files: true
+data:
+  source:
+    dataset_dirs:
+      - /mnt/hwdata/cfy/FastWAM/data/vlabench_primitive_ft_lerobot
+    text_embedding_cache_dir: /mnt/hwdata/cfy/FastWAM/data/text_embeds_cache/vlabench
+    context_len: 128
+overwrite: false
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

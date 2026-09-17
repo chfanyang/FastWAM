@@ -77,7 +77,7 @@ class VisualActionRepresentationMetadataTest(unittest.TestCase):
                 224,
                 448,
                 {
-                    "environment": "libero",
+                    "environment": "vlabench" if representation == "vlabench_rothko" else "libero",
                     "layout": "single_arm_duplicated_horizontal",
                 },
             )
@@ -113,6 +113,20 @@ class VisualActionRepresentationMetadataTest(unittest.TestCase):
         self.assertEqual(robotwin["raymap_representation"], "rothko")
         self.assertEqual(libero["raymap_representation"], "libero_rothko")
         self.assertEqual(libero["environment"], "libero")
+
+    def test_vlabench_is_opt_in_and_rejects_libero_checkpoint(self):
+        model = self._model("vlabench_rothko")
+        metadata = model._visual_action_checkpoint_config()
+        self.assertEqual(metadata["environment"], "vlabench")
+        self.assertEqual(metadata["raymap_representation"], "vlabench_rothko")
+        model._validate_visual_action_checkpoint_config(metadata, checkpoint_path="vlabench.pt")
+        with self.assertRaises(ValueError):
+            model._validate_visual_action_checkpoint_config(
+                self._model("libero_rothko")._visual_action_checkpoint_config(),
+                checkpoint_path="libero.pt")
+        with self.assertRaises(ValueError):
+            self._model("libero_rothko")._validate_visual_action_checkpoint_config(
+                metadata, checkpoint_path="vlabench.pt")
 
     def test_legacy_robotwin_checkpoint_cannot_load_as_libero(self) -> None:
         robotwin = self._model("rothko")
