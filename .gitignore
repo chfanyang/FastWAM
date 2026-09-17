@@ -12,6 +12,7 @@ evaluate_results/
 third_party/RoboTwin/assets
 third_party/RoboTwin/policy/fastwam_policy
 third_party/LIBERO/
+third_party/rrt-algorithms/
 
 
 # ai coding
@@ -252,3 +253,9 @@ third_party/LIBERO-plus/
 # Local paper materials and benchmark checkout.
 /paper/
 /third_party/VLABench/
+
+# Local visual materials and additional upstream checkouts.
+/droid/
+/image.png
+/third_party/VLABench-openpi/
+/third_party/Wan2.1/
