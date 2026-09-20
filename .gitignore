@@ -259,3 +259,7 @@ third_party/LIBERO-plus/
 /image.png
 /third_party/VLABench-openpi/
 /third_party/Wan2.1/
+
+# Local transfer staging and reference-only upstream checkout.
+/video_a800/
+/third_party/cosmos-policy/
