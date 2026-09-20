@@ -1,5 +1,6 @@
 """VLABench-only decoder+conv2 fine-tuning; shared training code is unchanged."""
 import argparse
+from bisect import bisect_right
 import contextlib
 import json
 import math
@@ -18,6 +19,7 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
 import finetune_rothko_vae_decoder as core
+from vlabench_vae_validation_subset import load_indices
 from fastwam.datasets.latent_cache import sha256_file
 from fastwam.datasets.vlabench_video import pose_xyz_euler_to_wxyz
 from fastwam.models.wan22.helpers.loader import _load_registered_model
@@ -29,23 +31,40 @@ class Windows(Dataset):
         cfg=OmegaConf.create(OmegaConf.to_container(config.data[split], resolve=True))
         cfg.include_text_context=False
         self.ds=instantiate(cfg)
-        self.ds.windows.camera_keys=()
-        self.ds.windows.reader.cameras=()
+        self.parts=list(self.ds.datasets) if hasattr(self.ds,'datasets') else [self.ds]
+        self.ends=np.cumsum([len(part) for part in self.parts]).tolist()
+        self.episode_ids=sorted({ep for part in self.parts for ep in part.windows.reader.episodes})
+        for part in self.parts:
+            part.windows.camera_keys=()
+            part.windows.reader.cameras=()
+        if split=='train':
+            metas=[part.latent_cache.metadata for part in self.parts]
+            self.cache_metadata=dict(metas[0])
+            for meta in metas:
+                assert meta['vae_identity']==metas[0]['vae_identity']
+                assert meta['model_variant']==metas[0]['model_variant']
+            if len(metas)>1:
+                self.cache_metadata['dataset_contract']=[meta['dataset_contract'] for meta in metas]
         self.split=split
 
     def __len__(self):
         return len(self.ds)
 
     def __getitem__(self,index):
-        raw=self.ds.windows[index]
+        part_index=bisect_right(self.ends,index)
+        part=self.parts[part_index]
+        local_index=index-(self.ends[part_index-1] if part_index else 0)
+        if part.sample_indices is not None:
+            local_index=part.sample_indices[local_index]
+        raw=part.windows[local_index]
         state,action=raw['raw_state']['default'],raw['raw_action']['default']
         base=pose_xyz_euler_to_wxyz(state[0])
         pose=torch.cat((base[None],pose_xyz_euler_to_wxyz(action)))
         grip=torch.cat((raw['raw_state']['gripper_open'][:1],raw['raw_action']['gripper_open']))
-        result=dict(target=self.ds.codec.encode(pose,grip),pose=pose,gripper=grip,
+        result=dict(target=part.codec.encode(pose,grip),pose=pose,gripper=grip,
                     action_is_pad=raw['action_is_pad'],index=index)
         if self.split=='train':
-            result['latent']=self.ds.latent_cache[index][1]
+            result['latent']=part.latent_cache[local_index][1]
         return result
 
 
@@ -63,11 +82,14 @@ def atomic_json(path,value):
 
 
 @torch.no_grad()
-def evaluate(vae, deployment, val, val_cache, masks, loss_args, step, output, rank, world, smoke):
+def evaluate(vae, deployment, val, val_cache, masks, loss_args, step, output, rank, world, smoke, selected_indices=None):
     deployment.model.decoder.load_state_dict(vae.model.decoder.state_dict(),strict=True)
     deployment.model.conv2.load_state_dict(vae.model.conv2.state_dict(),strict=True)
     rows=[]
-    indices=list(range(min(8,len(val)) if smoke else len(val)))[rank::world]
+    expected_indices=list(range(len(val))) if selected_indices is None else list(selected_indices)
+    if smoke:
+        expected_indices=expected_indices[:8]
+    indices=expected_indices[rank::world]
     for index in indices:
         sample=val[index]
         if index not in val_cache:
@@ -84,8 +106,7 @@ def evaluate(vae, deployment, val, val_cache, masks, loss_args, step, output, ra
     dist.all_gather_object(gathered,rows)
     if rank==0:
         rows=sorted([r for part in gathered for r in part],key=lambda r:r['val_index'])
-        expected=min(8,len(val)) if smoke else len(val)
-        assert [r['val_index'] for r in rows]==list(range(expected))
+        assert [r['val_index'] for r in rows]==expected_indices
         report=dict(step=step,windows=len(rows),val_loss=float(np.mean([r['loss'] for r in rows])),
                     first8=summarize(rows,'vae_vs_target',8),all16=summarize(rows,'vae_vs_target',16))
         atomic_json(output/f'eval_step{step:06d}.json',report)
@@ -113,10 +134,17 @@ def main():
     random.seed(c['seed']+rank);np.random.seed(c['seed']+rank);torch.manual_seed(c['seed']+rank)
     config=OmegaConf.load(c['train_config'])
     train,val=Windows(config,'train'),Windows(config,'val')
-    assert not set(train.ds.windows.reader.episodes)&set(val.ds.windows.reader.episodes)
+    validation_indices=None
+    subset_path=c.get('validation_window_manifest')
+    if subset_path:
+        reader=val.ds.windows.reader
+        validation_indices=load_indices(subset_path, total_windows=len(val),
+            episode_layout=[(ep,reader.lengths[ep]) for ep in reader.episodes],
+            split_sha256=val.ds.episode_split_metadata['sha256'])
+    assert not set(train.episode_ids)&set(val.ds.windows.reader.episodes)
     assert train.ds.codec.metadata()==val.ds.codec.metadata()
     assert train.ds.codec.norm_stats.fingerprint()==val.ds.codec.norm_stats.fingerprint()
-    cache_meta=train.ds.latent_cache.metadata
+    cache_meta=train.cache_metadata
     assert cache_meta['vae_identity']['sha256']==sha256_file(c['base_vae'])
     assert cache_meta['model_variant']=='wan2.1-t2v-1.3b'
     effective=c['batch_size']*c['grad_accum_steps']*world
@@ -125,8 +153,12 @@ def main():
     metadata=dict(vae_variant='wan2.1-t2v-1.3b',config=c,smoke=args.smoke,
         world_size=world,effective_batch=effective,steps_per_epoch=per_epoch,max_steps=total,
         train_windows=len(train),val_windows=len(val),
-        train_episodes=train.ds.windows.reader.episodes,val_episodes=val.ds.windows.reader.episodes,
+        train_episodes=train.episode_ids,val_episodes=val.ds.windows.reader.episodes,
         dataset_contract=cache_meta['dataset_contract'],vae_identity=cache_meta['vae_identity'])
+    if subset_path:
+        metadata.update(validation_windows_used=len(validation_indices),
+                        validation_window_manifest_sha256=sha256_file(subset_path),
+                        validation_window_indices=validation_indices)
     if rank==0:
         atomic_json(output/'training_config.json',metadata)
     # FP32 master weights; BF16 autocast only for decoder computation.
@@ -140,11 +172,14 @@ def main():
     deployment=_load_registered_model(c['base_vae'],'wan_video_vae',torch_dtype=torch.bfloat16,device='cuda')
     deployment.eval().requires_grad_(False)
     # Audit reused raymap latents against fresh original encoder output on each rank.
-    check=train[min(rank,len(train)-1)]
-    with torch.no_grad():
-        z=deployment.encode(check['target'][None].cuda().bfloat16(),device='cuda',tiled=False)[0].cpu()
-    assert torch.equal(z,check['latent']), 'Cached target/latent mismatch'
-    del z,check
+    audit_indices=([0]+train.ends[:-1]) if len(train.parts)>1 else list(range(min(world,len(train))))
+    for index in audit_indices[rank::world]:
+        check=train[index]
+        with torch.no_grad():
+            z=deployment.encode(check['target'][None].cuda().bfloat16(),device='cuda',tiled=False)[0].cpu()
+        assert torch.equal(z,check['latent']), f'Cached target/latent mismatch at {index}'
+        print(f'CACHE_AUDIT rank={rank} index={index} exact_match=True',flush=True)
+        del z,check
     cfg=train.ds.codec.config
     center,_,direction,border=core.region_masks(cfg.tile_height,cfg.tile_width,cfg.center_frac,
         cfg.boundary_margin,cfg.outer_margin,torch.device('cuda'))
@@ -170,7 +205,7 @@ def main():
     val_cache={}
 
     def validation():
-        report=evaluate(vae,deployment,val,val_cache,masks,loss_args,step,output,rank,world,args.smoke)
+        report=evaluate(vae,deployment,val,val_cache,masks,loss_args,step,output,rank,world,args.smoke,validation_indices)
         if wandb_run:
             flat={'eval/val_loss':report['val_loss']}
             for horizon in ('first8','all16'):
@@ -188,7 +223,8 @@ def main():
                 optimizer=optimizer.state_dict(),scheduler=scheduler.state_dict(),metadata=metadata,rng=rng,
                 wandb_id=wandb_run.id if wandb_run else None)
             tmp=path.with_suffix('.tmp');torch.save(payload,tmp);tmp.replace(path)
-            core.export_complete_vae(str(output/f'Wan2.1_VAE_vlabench_select_book_step{step:06d}.safetensors'),
+            export_stem=c.get('export_stem','Wan2.1_VAE_vlabench_select_book')
+            core.export_complete_vae(str(output/f'{export_stem}_step{step:06d}.safetensors'),
                                      vae,step,metadata)
             print('SAVED',path,flush=True)
         dist.barrier()
@@ -232,8 +268,16 @@ def main():
                     elapsed=time.monotonic()-start
                     print(f'step={step}/{total} loss={values[0].item():.6f} lr={scheduler.get_last_lr()[0]:.3g} sec/step={elapsed/(step-initial_step):.2f} peak_GB={torch.cuda.max_memory_allocated()/2**30:.2f}',flush=True)
                     if wandb_run: wandb_run.log({**{f'train/{k}':float(v) for k,v in zip(('loss','center','direction','gripper'),values)},'train/lr':scheduler.get_last_lr()[0]},step=step)
-            if step%c['eval_every']==0 or step==total: validation()
-            if step%c['save_every']==0 or step==total: save()
+            epoch_end=step%per_epoch==0
+            do_eval=step%c['eval_every']==0 or step==total or (epoch_end and c.get('eval_at_epoch_end',False))
+            do_save=step%c['save_every']==0 or step==total or (epoch_end and c.get('save_at_epoch_end',False))
+            if c.get('save_before_eval',False):
+                if do_save: save()
+                if do_eval: validation()
+            else:
+                if do_eval: validation()
+                if do_save: save()
+        del batches,loader
     if wandb_run: wandb_run.finish()
     dist.destroy_process_group()
 
