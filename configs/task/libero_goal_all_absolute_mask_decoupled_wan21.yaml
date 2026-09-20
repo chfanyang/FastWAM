@@ -1,0 +1,11 @@
+# @package _global_
+# Opt-in mask only; data, VAE, loss, cache and budget inherit the Goal baseline.
+defaults:
+  - libero_goal_rothko_all_absolute_2cam224_full_wan21_1_3b_1e-4
+  - _self_
+output_dir: ./runs/libero_goal_all_absolute_mask_decoupled_wan21/${now:%Y-%m-%d}_${now:%H-%M-%S}
+model:
+  video_dit_config:
+    video_attention_mask_mode: rgb_raymap_decoupled
+wandb:
+  name: libero_goal_all_absolute_mask_decoupled_wan21

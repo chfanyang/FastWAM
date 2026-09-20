@@ -567,6 +567,35 @@ class WanVideoDiT(torch.nn.Module):
             mask[condition_to_condition] = True
             return mask
 
+        if self.video_attention_mask_mode in {
+            "rgb_raymap_decoupled", "rgb_raymap_future_bidirectional"
+        }:
+            # Opt-in Goal ablations. Unlike legacy "bidirectional", neither
+            # mode lets clean condition queries read future tokens.
+            if video_seq_len % video_tokens_per_frame != 0:
+                raise ValueError("Paired RGB/Raymap masks require whole latent frames.")
+            num_frames = video_seq_len // video_tokens_per_frame
+            if num_frames < 4 or num_frames % 2:
+                raise ValueError("Paired RGB/Raymap masks require equal nonempty future blocks.")
+            split = num_frames // 2
+            if condition_frame_indices is None or tuple(condition_frame_indices) != (0, split):
+                raise ValueError(
+                    "Paired RGB/Raymap masks require condition_frame_indices="
+                    f"(0, {split}), got {condition_frame_indices}."
+                )
+            frame_mask = torch.zeros((num_frames, num_frames), dtype=torch.bool, device=device)
+            # All queries see both clean conditions; conditions see nothing else.
+            frame_mask[:, 0] = True
+            frame_mask[:, split] = True
+            frame_mask[1:split, 1:split] = True
+            frame_mask[split + 1:, split + 1:] = True
+            if self.video_attention_mask_mode == "rgb_raymap_future_bidirectional":
+                frame_mask[1:split, split + 1:] = True
+                frame_mask[split + 1:, 1:split] = True
+            return frame_mask.repeat_interleave(video_tokens_per_frame, dim=0).repeat_interleave(
+                video_tokens_per_frame, dim=1
+            )
+
         if self.video_attention_mask_mode == "rgb_then_raymap_block_causal":
             if video_seq_len % video_tokens_per_frame != 0:
                 raise ValueError(
