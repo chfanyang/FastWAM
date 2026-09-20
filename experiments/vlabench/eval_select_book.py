@@ -1,4 +1,4 @@
-"""Independent Track-1 select_book entry point using official control loop.
+"""Independent Track-1 task entry point (defaults to select_book) using official control loop.
 
 Runtime errors are recorded and re-raised, never counted as successful trials.
 The first version refuses nonempty output directories (no silent overwrites).
@@ -13,8 +13,22 @@ import sys
 from contextlib import nullcontext
 
 
-def main():
+def runtime_identity(args):
+    """A cached model/policy must never silently inherit another run's settings."""
+    return (str(args.checkpoint.resolve()),
+            str(args.vae_safetensors_path.resolve()) if args.vae_safetensors_path else None,
+            args.decode_mode, args.allow_vae_mismatch, args.replan_steps,
+            args.gripper_threshold, args.seed)
+
+
+class EvaluationRuntime:
+    def __init__(self, model, agent, identity):
+        self.model, self.agent, self.identity = model, agent, identity
+
+
+def main(argv=None, runtime=None):
     parser = argparse.ArgumentParser()
+    parser.add_argument('--task', default='select_book')
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--vae-safetensors-path', type=Path)
     parser.add_argument('--allow-vae-mismatch', action='store_true')
@@ -27,7 +41,7 @@ def main():
     parser.add_argument('--diagnostics', action='store_true', help='Record EE/IK and frames; no control changes.')
     parser.add_argument('--episode-ids', type=int, nargs='+', default=None,
                         help='Global Track-1 episode IDs; used by the multi-GPU manager.')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root))
     sys.path.insert(0, str(root / 'src'))
@@ -44,7 +58,9 @@ def main():
         raise FileExistsError(f'Refusing nonempty output directory: {args.output_dir}')
     track_path = root / 'third_party/VLABench/VLABench/configs/evaluation/tracks/track_1_in_distribution.json'
     track = json.loads(track_path.read_text())
-    if not 1 <= args.episodes <= len(track['select_book']):
+    if args.task not in track:
+        raise ValueError(f'Unknown Track 1 task: {args.task}')
+    if not 1 <= args.episodes <= len(track[args.task]):
         raise ValueError('Invalid Track 1 episode count')
     episode_ids = list(range(args.episodes)) if args.episode_ids is None else args.episode_ids
     if len(set(episode_ids)) != len(episode_ids) or any(i < 0 or i >= args.episodes for i in episode_ids):
@@ -60,25 +76,31 @@ def main():
     from VLABench.evaluation.evaluator.base import Evaluator
     from VLABench.configs import name2config
     from VLABench.utils.utils import find_key_by_value
-    register_default_resolvers()
-    config = OmegaConf.load(args.checkpoint.resolve().parents[2] / 'config.yaml')
-    config.model.load_text_encoder = True
-    config.model.rothko_decode_mode = args.decode_mode
-    config.model.rothko_decode_anchor_alpha = 0.
-    config.model.vae_safetensors_path = str(args.vae_safetensors_path) if args.vae_safetensors_path else None
-    if args.allow_vae_mismatch:
-        config.model.allow_vae_mismatch = True
-    model = instantiate(config.model, device='cuda', model_dtype=torch.bfloat16)
-    model.load_checkpoint(str(args.checkpoint))
-    model.validate_dataset_stats(config.data.train.pretrained_norm_stats)
-    model.eval().requires_grad_(False)
-    agent = FastWAMVLABenchPolicy(model, replan_steps=args.replan_steps,
-                                 gripper_threshold=args.gripper_threshold, seed=args.seed)
+    if runtime is None:
+        register_default_resolvers()
+        config = OmegaConf.load(args.checkpoint.resolve().parents[2] / 'config.yaml')
+        config.model.load_text_encoder = True
+        config.model.rothko_decode_mode = args.decode_mode
+        config.model.rothko_decode_anchor_alpha = 0.
+        config.model.vae_safetensors_path = str(args.vae_safetensors_path) if args.vae_safetensors_path else None
+        if args.allow_vae_mismatch:
+            config.model.allow_vae_mismatch = True
+        model = instantiate(config.model, device='cuda', model_dtype=torch.bfloat16)
+        model.load_checkpoint(str(args.checkpoint))
+        model.validate_dataset_stats(config.data.train.pretrained_norm_stats)
+        model.eval().requires_grad_(False)
+        agent = FastWAMVLABenchPolicy(model, replan_steps=args.replan_steps,
+                                     gripper_threshold=args.gripper_threshold, seed=args.seed)
+        runtime = EvaluationRuntime(model, agent, runtime_identity(args))
+    else:
+        if runtime.identity != runtime_identity(args):
+            raise ValueError("Persistent runtime configuration changed")
+        model, agent = runtime.model, runtime.agent
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    evaluator = Evaluator(tasks=['select_book'], n_episodes=args.episodes,
+    evaluator = Evaluator(tasks=[args.task], n_episodes=args.episodes,
         episode_config=track, max_substeps=1, save_dir=str(args.output_dir),
         visulization=True, metrics=['success_rate', 'intention_score', 'progress_score'])
-    task_config = evaluator.task_configs.get(find_key_by_value(name2config, 'select_book'), {})
+    task_config = evaluator.task_configs.get(find_key_by_value(name2config, args.task), {})
     limit = task_config.get('evaluation', {}).get('max_episode_length', 200)
     identity = {k: str(v) if isinstance(v, Path) else v for k,v in vars(args).items()}
     identity.update(track_sha256=hashlib.sha256(track_path.read_bytes()).hexdigest(),
@@ -99,8 +121,8 @@ def main():
                 from experiments.vlabench.diagnostics import record_episode
                 context = record_episode(agent, args.output_dir / f'diagnostics_episode_{episode:03d}')
             with context:
-                result = evaluator.evaluate_single_episode(agent, 'select_book', episode,
-                    track['select_book'][episode], seed=args.seed+episode, max_episode_length=limit)
+                result = evaluator.evaluate_single_episode(agent, args.task, episode,
+                    track[args.task][episode], seed=args.seed+episode, max_episode_length=limit)
         except Exception as error:
             (args.output_dir / f'episode_{episode:03d}.error.json').write_text(
                 json.dumps(dict(episode=episode,error=repr(error)),indent=2))
@@ -109,6 +131,7 @@ def main():
         (args.output_dir / f'episode_{episode:03d}.json').write_text(json.dumps(result, indent=2))
         results.append(result)
         (args.output_dir / 'metrics.json').write_text(json.dumps(evaluator.compute_metric(results),indent=2))
+    return runtime
 
 
 if __name__ == '__main__':

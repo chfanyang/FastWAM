@@ -25,3 +25,36 @@ python experiments/vlabench/run_select_book_manager.py \
 - This entry currently supports **only Track 1 select_book**. Original VAE, legacy decoder, no ensemble; joint future RGB denoising is retained but unused future RGB pixel decoding is skipped. Actual rollout videos are saved; predicted RGB videos are not.
 
 CPU checks: `python -m unittest discover -s tests -p test_vlabench_eval_sharding.py`.
+
+
+## Persistent multi-task Track1 workers
+
+`run_track1_persistent.py` keeps one model and policy per process. The shared
+queue contains `(task, episode)` jobs; eight GPUs with four slots each means
+32 persistent processes. A process starts the next episode immediately after
+finishing its previous one, without reloading DiT, VAE, or the text encoder.
+Each episode still resets the policy/RNG and creates a fresh official evaluator
+and environment. The official loop closes the environment at episode end.
+
+This entry defaults to the original VAE; pass `--vae-safetensors-path PATH --allow-vae-mismatch` for an explicitly selected finetuned decoder. Completed-result reuse also requires the same VAE path. It uses replan8, 20 denoising steps,
+legacy decoder, seed42 and max_substeps1 by default. Each worker limits numerical
+library threads to two. Worker failures stop the queue and are not scored as
+ordinary unsuccessful episodes; no automatic model reload/retry is performed.
+
+Prepare a plan without launching any worker:
+
+```bash
+python experiments/vlabench/run_track1_persistent.py   --checkpoint /absolute/path/to/checkpoints/weights/step_015000.pt   --output-dir /absolute/path/to/new_result_directory   --completed-from /absolute/path/to/old_dynamic_queue_results   --episodes 32 --gpu-ids 0 1 2 3 4 5 6 7 --workers-per-gpu 4   --threads 2 --replan-steps 8 --gripper-threshold 0.5 --seed 42   --dry-run
+```
+
+`--completed-from` reads the old queue's `task/episode_NNN/episode_NNN.json`
+layout, validates checkpoint and protocol identity, and skips only completed
+scenes. It does not overwrite or move old results. Stop/drain the old queue
+before launching the new queue; do not run them on the same GPUs concurrently.
+Use a fresh result directory and the same VLABench environment, PYTHONPATH,
+DIFFSYNTH_MODEL_BASE_PATH, MUJOCO_GL and TMPDIR as the established launcher.
+Remove `--dry-run` only when execution is authorized.
+
+CPU checks cover exact task/episode coverage, four slots per GPU, runtime reuse
+across tasks, error handling, protocol identity and reuse of completed results.
+Actual GPU multi-episode reuse still needs a runtime check on first launch.

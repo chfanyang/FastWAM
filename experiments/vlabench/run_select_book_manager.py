@@ -68,6 +68,7 @@ def stop_workers(processes):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--task', default='select_book')
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--vae-safetensors-path', type=Path)
     parser.add_argument('--allow-vae-mismatch', action='store_true')
@@ -92,7 +93,10 @@ def main():
         if not args.vae_safetensors_path.is_file():
             raise FileNotFoundError(args.vae_safetensors_path)
     track_path = ROOT / 'third_party/VLABench/VLABench/configs/evaluation/tracks/track_1_in_distribution.json'
-    available = len(json.loads(track_path.read_text())['select_book'])
+    track = json.loads(track_path.read_text())
+    if args.task not in track:
+        raise ValueError(f'Unknown Track 1 task: {args.task}')
+    available = len(track[args.task])
     if not 1 <= args.episodes <= available or args.threads < 1 or any(g < 0 for g in args.gpu_ids):
         raise ValueError('Invalid episode count, threads or GPU IDs')
     if not 1 <= args.replan_steps <= 16 or not 0 <= args.gripper_threshold <= 1:
@@ -102,7 +106,7 @@ def main():
     for rank, (gpu, ids) in enumerate(assignments):
         worker_dir = args.output_dir / f'worker{rank}_gpu{gpu}'
         cmd = [sys.executable, '-u', str(ROOT / 'experiments/vlabench/eval_select_book.py'),
-               '--checkpoint', str(args.checkpoint), '--output-dir', str(worker_dir),
+               '--task', args.task, '--checkpoint', str(args.checkpoint), '--output-dir', str(worker_dir),
                '--episodes', str(args.episodes), '--episode-ids', *map(str, ids),
                '--replan-steps', str(args.replan_steps),
                '--gripper-threshold', str(args.gripper_threshold), '--seed', str(args.seed)]
@@ -119,7 +123,7 @@ def main():
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise FileExistsError(f'Refusing nonempty output directory: {args.output_dir}')
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    plan = dict(checkpoint=str(args.checkpoint), episodes=args.episodes,
+    plan = dict(task=args.task, checkpoint=str(args.checkpoint), episodes=args.episodes,
                 gpu_ids=args.gpu_ids, workers_per_gpu=args.workers_per_gpu,
                 threads=args.threads, seed=args.seed,
                 replan_steps=args.replan_steps, gripper_threshold=args.gripper_threshold,
