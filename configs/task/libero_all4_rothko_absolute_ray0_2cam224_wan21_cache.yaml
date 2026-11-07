@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - libero_goal_rothko_absolute_ray0_2cam224_full_wan21_1_3b_1e-4
+  - _self_
+data:
+  train:
+    dataset_dirs:
+      - ./data/libero_mujoco3.3.2/libero_spatial_no_noops_lerobot
+      - ./data/libero_mujoco3.3.2/libero_object_no_noops_lerobot
+      - ./data/libero_mujoco3.3.2/libero_goal_no_noops_lerobot
+      - ./data/libero_mujoco3.3.2/libero_10_no_noops_lerobot
+    latent_cache_dir: ./data/libero_all4_rothko_absolute_ray0_wan21_bf16_h16_latents_20260922
+    text_embedding_cache_dir: ./data/text_embeds_cache/libero_wan21_bf16_batch1

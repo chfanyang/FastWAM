@@ -1,0 +1,13 @@
+{
+  "task": "libero_all4_rothko_absolute_ray0_2cam224_full_wan21_1_3b_1e-4",
+  "dit_run": "runs/libero_all4_rothko_absolute_ray0_2cam224_full_wan21_1_3b_1e-4/2026-09-22_06-15-04",
+  "dit_step": 21700,
+  "vae_run": "runs/libero_all4_absolute_ray0_decoder_wan21_bs2_ga4_lr1e-5_ep2",
+  "vae_step": 8264,
+  "expected_counts": {"libero_spatial": 2402, "libero_object": 2518, "libero_goal": 2591, "libero_10": 2519},
+  "roles": {
+    "3090_object": {"host": "172.16.12.17", "base": "/mnt/data/cfy/FastWAM", "python": "/mnt/data/cfy/anaconda3/envs/fastwam_libero_plus/bin/python", "full_suite": "libero_object", "spatial_parity": 0, "workers_per_gpu": 1},
+    "3090_goal": {"host": "172.16.12.18", "base": "/mnt/data/cfy/FastWAM", "python": "/mnt/data/cfy/miniconda3/envs/fastwam_libero_plus/bin/python", "full_suite": "libero_goal", "spatial_parity": 1, "workers_per_gpu": 1},
+    "a800_libero10": {"host": "172.16.12.6", "base": "/mnt/hwdata/cfy/FastWAM", "python": "/mnt/hwdata/cfy/miniconda3/envs/fastwam_libero/bin/python", "full_suite": "libero_10", "spatial_parity": null, "workers_per_gpu": 4}
+  }
+}
