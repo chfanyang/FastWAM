@@ -1,5 +1,6 @@
 """CPU-only tests; no model weights, camera drivers or robot connections."""
 import copy
+import gc
 import hashlib
 import importlib.util
 import json
@@ -256,6 +257,9 @@ class DatasetIntegrationTest(unittest.TestCase):
             (cache / "metadata.json").write_text(json.dumps(metadata))
             with self.assertRaisesRegex(ValueError, "contract mismatch"):
                 RealWorldVideoDataset(**kwargs, latent_cache_dir=cache, latent_cache_only=True)
+            # Release mapped shards before TemporaryDirectory removes them on NFS.
+            del ds, restored
+            gc.collect()  # Dataset's bound LRU wrappers form reference cycles.
 
     def test_actual_data_roundtrip_future_alignment_and_absolute_ray0(self):
         probes = json.loads((ARTIFACTS / "validation_windows.json").read_text())["samples"]
