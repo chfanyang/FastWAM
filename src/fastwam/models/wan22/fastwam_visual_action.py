@@ -362,11 +362,14 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
                 decode_anchor_alpha=rothko_decode_anchor_alpha,
                 decode_block_grid=rothko_decode_block_grid,
             )
-        elif self.raymap_representation in {"libero_rothko", "libero_rothko_all_absolute"}:
+        elif self.raymap_representation in {"libero_rothko", "libero_rothko_all_absolute", "libero_rothko_osc_delta"}:
             codec_class = LiberoRothkoCodec
             if self.raymap_representation == "libero_rothko_all_absolute":
                 from fastwam.representations.libero_rothko_all_absolute import LiberoAllAbsoluteRothkoCodec
                 codec_class = LiberoAllAbsoluteRothkoCodec
+            elif self.raymap_representation == "libero_rothko_osc_delta":
+                from fastwam.representations.libero_rothko_osc_delta import LiberoOSCDeltaRothkoCodec
+                codec_class = LiberoOSCDeltaRothkoCodec
             self.raymap_codec = codec_class(
                 config=LiberoRothkoCodecConfig(**codec_payload),
                 norm_stats=rothko_norm_stats,
@@ -393,7 +396,7 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             )
         else:
             raise ValueError(
-                "`raymap_representation` must be 'rothko', 'libero_rothko', 'libero_rothko_all_absolute', 'vlabench_rothko' or 'vlabench_rothko_all_absolute', "
+                "`raymap_representation` must be 'rothko', 'libero_rothko', 'libero_rothko_all_absolute', 'libero_rothko_osc_delta', 'vlabench_rothko' or 'vlabench_rothko_all_absolute', "
                 f"got {self.raymap_representation!r}."
             )
         # Decoding is an inference-time policy choice, not part of the learned
@@ -1690,6 +1693,13 @@ class FastWAMVideoOnlyRaymap(torch.nn.Module):
             )
 
         expected_codec_metadata = self.raymap_codec.metadata()
+        if self.raymap_representation == "libero_rothko_osc_delta":
+            required = ("pose_mode", "state_coordinate_frame", "future_pose_mode",
+                        "future_translation_axes", "position_bounds_scope", "osc_position_scale_m",
+                        "osc_rotation_scale_rad", "future_position_bounds_m", "gripper_semantics", "norm_stats_sha256")
+            missing = [key for key in required if visual_config.get(key) is None]
+            if missing:
+                raise ValueError(f"OSC checkpoint missing identity: {missing}")
         # Old checkpoints unambiguously use relative frame zero. Never allow
         # the new absolute conditioning to be silently enabled on old weights
         # (or an absolute checkpoint to be deployed with the legacy codec).

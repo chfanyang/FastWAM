@@ -1,0 +1,347 @@
+{
+  "version": 1,
+  "scope": "training_probes_not_heldout",
+  "suite_order": [
+    "goal"
+  ],
+  "dataset_length": 52895,
+  "metadata_sha256": {
+    "goal": {
+      "episodes.jsonl": "a9af4bd244f91acdb11f67087f8fa621613898f628a7b24a91f8ab3eaf01edd5",
+      "tasks.jsonl": "037bb69258f8297d5a05cf624573463ccada171fb625c7e829c2258d0ba6bbe2",
+      "info.json": "6a42725f7caf494850277047c93e7484821659f0ca778095777d8764ff82f52b"
+    }
+  },
+  "samples": [
+    {
+      "suite": "goal",
+      "task_index": 0,
+      "task": "open the middle drawer of the cabinet",
+      "episode_index": 0,
+      "frame_index": 0,
+      "dataset_index": 0,
+      "phase": "start",
+      "valid_action_steps": 16,
+      "diffusion_seed": 42
+    },
+    {
+      "suite": "goal",
+      "task_index": 0,
+      "task": "open the middle drawer of the cabinet",
+      "episode_index": 21,
+      "frame_index": 68,
+      "dataset_index": 3039,
+      "phase": "middle",
+      "valid_action_steps": 16,
+      "diffusion_seed": 43
+    },
+    {
+      "suite": "goal",
+      "task_index": 0,
+      "task": "open the middle drawer of the cabinet",
+      "episode_index": 41,
+      "frame_index": 150,
+      "dataset_index": 5815,
+      "phase": "tail",
+      "valid_action_steps": 8,
+      "diffusion_seed": 44
+    },
+    {
+      "suite": "goal",
+      "task_index": 1,
+      "task": "open the top drawer and put the bowl inside",
+      "episode_index": 42,
+      "frame_index": 0,
+      "dataset_index": 5823,
+      "phase": "start",
+      "valid_action_steps": 16,
+      "diffusion_seed": 45
+    },
+    {
+      "suite": "goal",
+      "task_index": 1,
+      "task": "open the top drawer and put the bowl inside",
+      "episode_index": 58,
+      "frame_index": 99,
+      "dataset_index": 9269,
+      "phase": "middle",
+      "valid_action_steps": 16,
+      "diffusion_seed": 46
+    },
+    {
+      "suite": "goal",
+      "task_index": 1,
+      "task": "open the top drawer and put the bowl inside",
+      "episode_index": 74,
+      "frame_index": 165,
+      "dataset_index": 12517,
+      "phase": "tail",
+      "valid_action_steps": 8,
+      "diffusion_seed": 47
+    },
+    {
+      "suite": "goal",
+      "task_index": 2,
+      "task": "push the plate to the front of the stove",
+      "episode_index": 75,
+      "frame_index": 0,
+      "dataset_index": 12525,
+      "phase": "start",
+      "valid_action_steps": 16,
+      "diffusion_seed": 48
+    },
+    {
+      "suite": "goal",
+      "task_index": 2,
+      "task": "push the plate to the front of the stove",
+      "episode_index": 94,
+      "frame_index": 100,
+      "dataset_index": 15643,
+      "phase": "middle",
+      "valid_action_steps": 16,
+      "diffusion_seed": 49
+    },
+    {
+      "suite": "goal",
+      "task_index": 2,
+      "task": "push the plate to the front of the stove",
+      "episode_index": 113,
+      "frame_index": 138,
+      "dataset_index": 18455,
+      "phase": "tail",
+      "valid_action_steps": 8,
+      "diffusion_seed": 50
+    },
+    {
+      "suite": "goal",
+      "task_index": 3,
+      "task": "put the bowl on the plate",
+      "episode_index": 114,
+      "frame_index": 0,
+      "dataset_index": 18463,
+      "phase": "start",
+      "valid_action_steps": 16,
+      "diffusion_seed": 51
+    },
+    {
+      "suite": "goal",
+      "task_index": 3,
+      "task": "put the bowl on the plate",
+      "episode_index": 139,
+      "frame_index": 48,
+      "dataset_index": 20855,
+      "phase": "middle",
+      "valid_action_steps": 16,
+      "diffusion_seed": 52
+    },
+    {
+      "suite": "goal",
+      "task_index": 3,
+      "task": "put the bowl on the plate",
+      "episode_index": 163,
+      "frame_index": 82,
+      "dataset_index": 23114,
+      "phase": "tail",
+      "valid_action_steps": 8,
+      "diffusion_seed": 53
+    },
+    {
+      "suite": "goal",
+      "task_index": 4,
+      "task": "put the bowl on the stove",
+      "episode_index": 164,
+      "frame_index": 0,
+      "dataset_index": 23122,
+      "phase": "start",
+      "valid_action_steps": 16,
+      "diffusion_seed": 54
+    },
+    {
+      "suite": "goal",
+      "task_index": 4,
+      "task": "put the bowl on the stove",
+      "episode_index": 189,
+      "frame_index": 57,
+      "dataset_index": 25729,
+      "phase": "middle",
+      "valid_action_steps": 16,
+      "diffusion_seed": 55
+    },
+    {
+      "suite": "goal",
+      "task_index": 4,
+      "task": "put the bowl on the stove",
+      "episode_index": 213,
+      "frame_index": 86,
+      "dataset_index": 28187,
+      "phase": "tail",
+      "valid_action_steps": 8,
+      "diffusion_seed": 56
+    },
+    {
+      "suite": "goal",
+      "task_index": 5,
+      "task": "put the bowl on top of the cabinet",
+      "episode_index": 214,
+      "frame_index": 0,
+      "dataset_index": 28195,
+      "phase": "start",
+      "valid_action_steps": 16,
+      "diffusion_seed": 57
+    },
+    {
+      "suite": "goal",
+      "task_index": 5,
+      "task": "put the bowl on top of the cabinet",
+      "episode_index": 237,
+      "frame_index": 51,
+      "dataset_index": 30542,
+      "phase": "middle",
+      "valid_action_steps": 16,
+      "diffusion_seed": 58
+    },
+    {
+      "suite": "goal",
+      "task_index": 5,
+      "task": "put the bowl on top of the cabinet",
+      "episode_index": 260,
+      "frame_index": 102,
+      "dataset_index": 32903,
+      "phase": "tail",
+      "valid_action_steps": 8,
+      "diffusion_seed": 59
+    },
+    {
+      "suite": "goal",
+      "task_index": 6,
+      "task": "put the cream cheese in the bowl",
+      "episode_index": 261,
+      "frame_index": 0,
+      "dataset_index": 32911,
+      "phase": "start",
+      "valid_action_steps": 16,
+      "diffusion_seed": 60
+    },
+    {
+      "suite": "goal",
+      "task_index": 6,
+      "task": "put the cream cheese in the bowl",
+      "episode_index": 280,
+      "frame_index": 53,
+      "dataset_index": 34874,
+      "phase": "middle",
+      "valid_action_steps": 16,
+      "diffusion_seed": 61
+    },
+    {
+      "suite": "goal",
+      "task_index": 6,
+      "task": "put the cream cheese in the bowl",
+      "episode_index": 299,
+      "frame_index": 87,
+      "dataset_index": 36927,
+      "phase": "tail",
+      "valid_action_steps": 8,
+      "diffusion_seed": 62
+    },
+    {
+      "suite": "goal",
+      "task_index": 7,
+      "task": "put the wine bottle on the rack",
+      "episode_index": 300,
+      "frame_index": 0,
+      "dataset_index": 36935,
+      "phase": "start",
+      "valid_action_steps": 16,
+      "diffusion_seed": 63
+    },
+    {
+      "suite": "goal",
+      "task_index": 7,
+      "task": "put the wine bottle on the rack",
+      "episode_index": 319,
+      "frame_index": 77,
+      "dataset_index": 40446,
+      "phase": "middle",
+      "valid_action_steps": 16,
+      "diffusion_seed": 64
+    },
+    {
+      "suite": "goal",
+      "task_index": 7,
+      "task": "put the wine bottle on the rack",
+      "episode_index": 337,
+      "frame_index": 159,
+      "dataset_index": 43652,
+      "phase": "tail",
+      "valid_action_steps": 8,
+      "diffusion_seed": 65
+    },
+    {
+      "suite": "goal",
+      "task_index": 8,
+      "task": "put the wine bottle on top of the cabinet",
+      "episode_index": 338,
+      "frame_index": 0,
+      "dataset_index": 43660,
+      "phase": "start",
+      "valid_action_steps": 16,
+      "diffusion_seed": 66
+    },
+    {
+      "suite": "goal",
+      "task_index": 8,
+      "task": "put the wine bottle on top of the cabinet",
+      "episode_index": 360,
+      "frame_index": 50,
+      "dataset_index": 46081,
+      "phase": "middle",
+      "valid_action_steps": 16,
+      "diffusion_seed": 67
+    },
+    {
+      "suite": "goal",
+      "task_index": 8,
+      "task": "put the wine bottle on top of the cabinet",
+      "episode_index": 382,
+      "frame_index": 92,
+      "dataset_index": 48433,
+      "phase": "tail",
+      "valid_action_steps": 8,
+      "diffusion_seed": 68
+    },
+    {
+      "suite": "goal",
+      "task_index": 9,
+      "task": "turn on the stove",
+      "episode_index": 383,
+      "frame_index": 0,
+      "dataset_index": 48441,
+      "phase": "start",
+      "valid_action_steps": 16,
+      "diffusion_seed": 69
+    },
+    {
+      "suite": "goal",
+      "task_index": 9,
+      "task": "turn on the stove",
+      "episode_index": 408,
+      "frame_index": 40,
+      "dataset_index": 50728,
+      "phase": "middle",
+      "valid_action_steps": 16,
+      "diffusion_seed": 70
+    },
+    {
+      "suite": "goal",
+      "task_index": 9,
+      "task": "turn on the stove",
+      "episode_index": 432,
+      "frame_index": 69,
+      "dataset_index": 52887,
+      "phase": "tail",
+      "valid_action_steps": 8,
+      "diffusion_seed": 71
+    }
+  ]
+}

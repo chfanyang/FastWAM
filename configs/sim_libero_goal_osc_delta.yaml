@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - sim_libero_all_absolute
+  - override /task: libero_goal_rothko_osc_delta_2cam224_full_wan21_1_3b_1e-4
+  - _self_
+EVALUATION:
+  task_suite_name: libero_goal
+  use_action_ensembler: false

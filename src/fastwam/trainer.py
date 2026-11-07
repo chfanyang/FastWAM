@@ -100,6 +100,22 @@ def load_fixed_validation_manifest(
     return payload
 
 
+def resolve_visual_eval_indices(cfg, dataset_length: int) -> list[int]:
+    """Opt-in explicit probes; preserve historical consecutive selection."""
+    explicit = cfg.get("eval_sample_indices")
+    if explicit is None:
+        return [(int(cfg.get("eval_sample_index", 0)) + i) % dataset_length
+                for i in range(int(cfg.get("eval_num_samples", 4)))]
+    indices = list(explicit)
+    if (not indices or any(type(i) is not int for i in indices)
+            or len(indices) != len(set(indices))
+            or any(i < 0 or i >= dataset_length for i in indices)):
+        raise ValueError("eval_sample_indices must be unique integer indices within the dataset")
+    if cfg.get("eval_sample_manifest") not in (None, "", "null"):
+        raise ValueError("Choose eval_sample_indices or eval_sample_manifest, not both")
+    return indices
+
+
 def _decoded_pose_metrics(
     predicted_pose: torch.Tensor,
     target_pose: torch.Tensor,
@@ -263,6 +279,10 @@ class Wan22Trainer:
         self._assert_dataset_length_consistent(self.train_dataset, "train_dataset")
         if self.val_dataset is not None:
             self._assert_dataset_length_consistent(self.val_dataset, "val_dataset")
+        if self.cfg.get("eval_sample_indices") is not None:
+            if self.val_dataset is None:
+                raise ValueError("eval_sample_indices requires a validation dataset")
+            resolve_visual_eval_indices(self.cfg, len(self.val_dataset))
         if self.eval_sample_manifest_path is not None:
             if self.val_dataset is None:
                 raise ValueError("`eval_sample_manifest` requires a validation dataset.")
@@ -1027,20 +1047,18 @@ class Wan22Trainer:
                 "decoded_gripper_mae",
                 "decoded_gripper_accuracy",
             )
+            eval_indices = resolve_visual_eval_indices(self.cfg, len(self.val_dataset))
             per_sample_results = []
             local_eval_indices = []
             # `eval_num_samples` is a global group size, independent of GPU
             # count.  Ranks split the fixed group in round-robin order.
             local_offsets = range(
                 self.accelerator.process_index,
-                self.eval_num_samples,
+                len(eval_indices),
                 self.accelerator.num_processes,
             )
             for sample_offset in local_offsets:
-                eval_index = (
-                    self.eval_sample_index
-                    + sample_offset
-                ) % len(self.val_dataset)
+                eval_index = eval_indices[sample_offset]
                 eval_seed = self.eval_random_seed + sample_offset
                 local_eval_indices.append(eval_index)
                 sample = self._get_fixed_visual_action_eval_sample(
@@ -1091,10 +1109,6 @@ class Wan22Trainer:
                 if count:
                     result[key] = total / count
 
-            eval_indices = [
-                (self.eval_sample_index + offset) % len(self.val_dataset)
-                for offset in range(self.eval_num_samples)
-            ]
             result["video_paths"] = [
                 os.path.join(
                     self.eval_dir,
@@ -1113,7 +1127,7 @@ class Wan22Trainer:
                     "across %d rank(s).",
                     eval_indices,
                     self.eval_random_seed,
-                    self.eval_random_seed + self.eval_num_samples - 1,
+                    self.eval_random_seed + len(eval_indices) - 1,
                     self.accelerator.num_processes,
                 )
             return result

@@ -1,0 +1,22 @@
+# @package _global_
+# All4 cache/training contract; formal training launch still requires approval.
+defaults:
+  - libero_goal_rothko_osc_delta_2cam224_full_wan21_1_3b_1e-4
+  - _self_
+output_dir: ./runs/libero_all4_rothko_osc_delta_2cam224_wan21/${now:%Y-%m-%d}_${now:%H-%M-%S}
+data:
+  train:
+    dataset_dirs:
+      - ./data/libero_mujoco3.3.2/libero_spatial_no_noops_lerobot
+      - ./data/libero_mujoco3.3.2/libero_object_no_noops_lerobot
+      - ./data/libero_mujoco3.3.2/libero_goal_no_noops_lerobot
+      - ./data/libero_mujoco3.3.2/libero_10_no_noops_lerobot
+    latent_cache_dir: ./data/libero_all4_osc_delta_2cam224_wan21_bf16_h16_latents
+save_every: 3000
+state_save_every: 3000
+wandb:
+  name: libero_all4_rothko_osc_delta_2cam224_wan21
+  group: libero_all4_osc_delta
+# Fixed task-balanced training probes (not held-out).
+eval_num_samples: 120
+eval_sample_indices: [0, 2180, 4478, 4486, 7190, 9827, 9835, 13111, 16140, 16148, 19107, 22049, 22057, 24910, 27455, 27463, 30409, 33369, 33377, 35593, 37869, 37877, 40175, 42258, 42266, 44720, 47134, 47142, 50280, 53221, 53229, 56854, 60545, 60553, 63682, 66813, 66821, 70359, 73915, 73923, 78010, 81879, 81887, 85181, 88401, 88409, 91631, 94742, 94750, 97854, 101178, 101186, 104491, 107757, 107765, 110904, 114009, 114017, 117301, 120530, 120538, 123577, 126353, 126361, 129807, 133055, 133063, 136181, 138993, 139001, 141393, 143652, 143660, 146267, 148725, 148733, 151080, 153441, 153449, 155412, 157465, 157473, 160984, 164190, 164198, 166619, 168971, 168979, 171266, 173425, 173433, 179098, 184811, 184819, 188930, 193377, 193385, 198038, 202725, 202733, 209340, 216130, 216138, 222228, 228125, 228133, 233722, 239194, 239202, 245362, 251146, 251154, 255835, 260594, 260602, 265380, 270071, 270079, 273943, 277705]

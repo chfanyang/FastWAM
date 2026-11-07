@@ -230,7 +230,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         )
         if (
             self.libero_action_gripper_key is not None
-            and raymap_representation not in {"libero_rothko", "libero_rothko_all_absolute"}
+            and raymap_representation not in {"libero_rothko", "libero_rothko_all_absolute", "libero_rothko_osc_delta"}
         ):
             raise ValueError(
                 "`libero_action_gripper_key` is only valid with "
@@ -238,10 +238,10 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             )
         self.raymap_codec = None
         if raymap_representation is not None:
-            if raymap_representation not in ("rothko", "libero_rothko", "libero_rothko_all_absolute"):
+            if raymap_representation not in ("rothko", "libero_rothko", "libero_rothko_all_absolute", "libero_rothko_osc_delta"):
                 raise ValueError(
                     "`raymap_representation` must be one of "
-                    "['rothko', 'libero_rothko', 'libero_rothko_all_absolute'], "
+                    "['rothko', 'libero_rothko', 'libero_rothko_all_absolute', 'libero_rothko_osc_delta'], "
                     f"got {raymap_representation!r}."
                 )
             if action_video_freq_ratio != 1:
@@ -284,6 +284,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 if raymap_representation == "libero_rothko_all_absolute":
                     from fastwam.representations.libero_rothko_all_absolute import LiberoAllAbsoluteRothkoCodec
                     codec_class = LiberoAllAbsoluteRothkoCodec
+                elif raymap_representation == "libero_rothko_osc_delta":
+                    from fastwam.representations.libero_rothko_osc_delta import LiberoOSCDeltaRothkoCodec
+                    codec_class = LiberoOSCDeltaRothkoCodec
                 self.raymap_codec = codec_class(
                     config=codec_config,
                     norm_stats=rothko_norm_stats,
@@ -425,7 +428,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 left_wrist=video[1],
                 right_wrist=video[2],
             )
-        elif self.raymap_representation in {"libero_rothko", "libero_rothko_all_absolute"}:
+        elif self.raymap_representation in {"libero_rothko", "libero_rothko_all_absolute", "libero_rothko_osc_delta"}:
             if num_cameras != 2 or self.concat_multi_camera != "horizontal":
                 raise ValueError(
                     "LIBERO Rothko requires two horizontally concatenated cameras, "
@@ -452,7 +455,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
 
         if (
             self.concat_multi_camera != "robotwin"
-            and self.raymap_representation not in {"libero_rothko", "libero_rothko_all_absolute"}
+            and self.raymap_representation not in {"libero_rothko", "libero_rothko_all_absolute", "libero_rothko_osc_delta"}
         ):
             # The shared RoboTwin builder already returns the exact target
             # shape and applies the same [-1, 1] normalization.
@@ -501,6 +504,9 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                     "raw_state.default": raw_state.get("default"),
                     f"raw_state.{self.robotwin_ee_pose_key}": raw_state.get(self.robotwin_ee_pose_key),
                 }
+            elif self.raymap_representation == "libero_rothko_osc_delta":
+                required_raw = {"raw_action.default": raw_action.get("default"),
+                                "raw_state.default": raw_state.get("default")}
             else:
                 required_raw = {
                     "raw_action.default": raw_action.get("default"),
@@ -539,6 +545,17 @@ class RobotVideoDataset(torch.utils.data.Dataset):
                 future_endpose = action_endpose
                 current_gripper = raw_state_qpos[0, [6, 13]]
                 future_gripper = raw_action_qpos[:, [6, 13]]
+            elif self.raymap_representation == "libero_rothko_osc_delta":
+                from fastwam.representations.libero_rothko_osc_delta import action_to_delta_pose
+                from fastwam.representations.libero_osc import ee_state_axis_angle_to_pose_wxyz, panda_gripper_qpos_to_open
+                state = raw_state["default"].float()
+                command = raw_action["default"].float()
+                if state.shape != (self.num_frames, 8) or command.shape != (self.num_frames - 1, 7):
+                    raise ValueError('OSC codec expects original LIBERO state[T,8] and action[T-1,7]')
+                current_endpose = ee_state_axis_angle_to_pose_wxyz(state[0, :6])
+                current_gripper = panda_gripper_qpos_to_open(state[0, 6:8])
+                future_endpose = action_to_delta_pose(command)
+                future_gripper = resolve_libero_future_gripper(raw_action, action_horizon=self.num_frames - 1)
             else:
                 action_target = raw_action["osc_target_pose_wxyz"].float()
                 state_pose = raw_state["ee_pose_wxyz"].float()

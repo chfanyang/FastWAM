@@ -185,7 +185,7 @@ def _obs_to_model_input(
     num_cameras = processor.num_output_cameras
     is_visual_action = (
         str(cfg.data.train.get("raymap_representation", ""))
-        in {"libero_rothko", "libero_rothko_all_absolute"}
+        in {"libero_rothko", "libero_rothko_all_absolute", "libero_rothko_osc_delta"}
     )
     if is_visual_action:
         if num_cameras != 2 or concatenation != "horizontal":
@@ -286,8 +286,17 @@ def _extract_gripper_open(obs: dict) -> torch.Tensor:
 def _is_libero_rothko(cfg: DictConfig) -> bool:
     return (
         str(cfg.data.train.get("raymap_representation", ""))
-        in {"libero_rothko", "libero_rothko_all_absolute"}
+        in {"libero_rothko", "libero_rothko_all_absolute", "libero_rothko_osc_delta"}
     )
+
+
+def _osc_delta_to_env_action(delta_pose, gripper_open, *, binarize_gripper):
+    from fastwam.representations.libero_rothko_osc_delta import delta_pose_to_action_motion
+    motion = delta_pose_to_action_motion(torch.as_tensor(delta_pose, dtype=torch.float32))
+    opening = float(torch.as_tensor(gripper_open).reshape(-1)[0])
+    if binarize_gripper:
+        opening = float(opening >= 0.5)
+    return np.concatenate((motion.cpu().numpy(), [1.0 - 2.0 * np.clip(opening, 0, 1)])).astype(np.float32)
 
 
 def _absolute_target_to_env_action(
@@ -336,6 +345,9 @@ def _get_num_video_frames(cfg: DictConfig) -> int:
 
 
 def _validate_eval_runtime_cfg(cfg: DictConfig) -> int:
+    if str(cfg.data.train.get("raymap_representation", "")) == "libero_rothko_osc_delta":
+        if bool(cfg.EVALUATION.get("use_action_ensembler", False)):
+            raise ValueError("OSC delta eval does not use absolute-pose action ensembling")
     num_trials = int(cfg.EVALUATION.num_trials)
     if num_trials <= 0:
         raise ValueError(f"EVALUATION.num_trials must be positive, got {num_trials}.")
@@ -747,19 +759,18 @@ def run_single_episode(
         if _is_libero_rothko(cfg):
             target_pose, gripper_open, target_index = pending
             actual_pose_before = _extract_absolute_pose_wxyz(obs)
-            raw_motion = absolute_target_to_normalized_action(
-                actual_pose_before,
-                torch.as_tensor(target_pose, dtype=torch.float32),
-                clip=False,
-            )
-            action_to_execute = _absolute_target_to_env_action(
-                obs,
-                target_pose,
-                gripper_open,
-                binarize_gripper=bool(
-                    cfg.EVALUATION.get("binarize_gripper", True)
-                ),
-            )
+            is_osc_delta = str(cfg.data.train.get("raymap_representation", "")) == "libero_rothko_osc_delta"
+            if is_osc_delta:
+                from fastwam.representations.libero_rothko_osc_delta import delta_pose_to_action_motion
+                raw_motion = delta_pose_to_action_motion(torch.as_tensor(target_pose, dtype=torch.float32), clip=False)
+                action_to_execute = _osc_delta_to_env_action(target_pose, gripper_open,
+                    binarize_gripper=bool(cfg.EVALUATION.get("binarize_gripper", True)))
+            else:
+                raw_motion = absolute_target_to_normalized_action(
+                    actual_pose_before, torch.as_tensor(target_pose, dtype=torch.float32), clip=False)
+                action_to_execute = _absolute_target_to_env_action(
+                    obs, target_pose, gripper_open,
+                    binarize_gripper=bool(cfg.EVALUATION.get("binarize_gripper", True)))
             if bool(cfg.EVALUATION.get("save_control_trace", False)):
                 control_trace.append(
                     {
@@ -767,8 +778,8 @@ def run_single_episode(
                         "env_step": int(t),
                         "replan_index": int(current_replan_idx),
                         "target_index": int(target_index),
-                        "predicted_target_xyz": np.asarray(target_pose)[:3].tolist(),
-                        "predicted_target_quaternion_wxyz": np.asarray(
+                        ("predicted_delta_xyz" if is_osc_delta else "predicted_target_xyz"): np.asarray(target_pose)[:3].tolist(),
+                        ("predicted_delta_quaternion_wxyz" if is_osc_delta else "predicted_target_quaternion_wxyz"): np.asarray(
                             target_pose
                         )[3:7].tolist(),
                         "actual_xyz_before_action": actual_pose_before[:3].tolist(),
