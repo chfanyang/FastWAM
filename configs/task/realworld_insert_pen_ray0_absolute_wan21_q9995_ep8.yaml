@@ -1,0 +1,25 @@
+# @package _global_
+defaults:
+  - realworld_all4_ray0_absolute_wan21_q9995_ep8
+  - _self_
+
+output_dir: ./runs/realworld_insert_pen_ray0_absolute_wan21_q9995_ep8/${now:%Y-%m-%d}_${now:%H-%M-%S}
+data:
+  train:
+    _target_: fastwam.realworld.task_subset.TaskSubsetVideoDataset
+    task_name: insert_pen
+    subset_manifest: ./data/realworld_artifacts/insert_pen_q9995_v1/subset.json
+    latent_cache_dir: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_q9995_v1/latents_wan21_bf16
+    latent_cache_only: true
+  val:
+    task_name: ${data.train.task_name}
+    subset_manifest: ${data.train.subset_manifest}
+model:
+  video_dit_config:
+    use_gradient_checkpointing: false
+eval_num_samples: 2
+eval_sample_manifest: ./data/realworld_artifacts/insert_pen_q9995_v1/validation_windows.json
+wandb:
+  name: realworld_insert_pen_ray0_absolute_wan21_q9995_ep8
+
+num_epochs: 8

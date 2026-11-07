@@ -1,0 +1,17 @@
+defaults:
+  - fastwam
+  - _self_
+
+_target_: fastwam.realworld.baseline_model.create_model
+action_stats: ${data.train.pretrained_norm_stats}
+split_manifest: ${data.train.split_manifest}
+proprio_dim: 8
+mot_checkpoint_mixed_attn: true
+video_dit_config:
+  action_dim: 7
+action_dit_config:
+  action_dim: 7
+# Preserve original FastWAM loss weights, not the Rothko loss.
+loss:
+  lambda_video: 1.0
+  lambda_action: 1.0

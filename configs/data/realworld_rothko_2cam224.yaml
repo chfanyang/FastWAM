@@ -1,0 +1,30 @@
+train:
+  _target_: fastwam.realworld.dataset.RealWorldVideoDataset
+  dataset_dir: ./data/realworld_data
+  split_manifest: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_v2/split.json
+  split: train
+  rothko_norm_stats: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_v2/rothko_stats.pt
+  pretrained_norm_stats: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_v2/rothko_stats.json
+  text_embedding_cache_dir: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_v2/text
+  context_len: 128
+  include_text_context: true
+  video_size: [224, 448]
+  # Loaded from this experiment's train-only stats by its isolated model factory.
+  rothko_config: null
+  latent_cache_dir: null
+  latent_cache_only: false
+  sample_error_mode: raise
+
+val:
+  _target_: ${data.train._target_}
+  dataset_dir: ${data.train.dataset_dir}
+  split_manifest: ${data.train.split_manifest}
+  split: val
+  rothko_norm_stats: ${data.train.rothko_norm_stats}
+  pretrained_norm_stats: ${data.train.pretrained_norm_stats}
+  text_embedding_cache_dir: ${data.train.text_embedding_cache_dir}
+  context_len: ${data.train.context_len}
+  include_text_context: ${data.train.include_text_context}
+  video_size: ${data.train.video_size}
+  rothko_config: ${data.train.rothko_config}
+  sample_error_mode: raise

@@ -1,0 +1,11 @@
+defaults:
+  - fastwam_video_only_libero_rothko_wan21_1_3b
+  - _self_
+
+_target_: fastwam.realworld.runtime.create_model
+rothko_decode_mode: legacy
+rothko_decode_anchor_alpha: 0.0
+rothko_config: ${data.train.rothko_config}
+video_dit_config:
+  action_dim: 8
+  use_gradient_checkpointing: true

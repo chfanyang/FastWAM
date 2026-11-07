@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - realworld_all4_ray0_absolute_wan21_ep8
+  - _self_
+
+output_dir: ./runs/realworld_all4_ray0_absolute_wan21_q9995_ep8/${now:%Y-%m-%d}_${now:%H-%M-%S}
+data:
+  train:
+    split_manifest: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_q9995_v1/split.json
+    rothko_norm_stats: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_q9995_v1/rothko_stats.pt
+    pretrained_norm_stats: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_q9995_v1/rothko_stats.json
+    text_embedding_cache_dir: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_q9995_v1/text
+eval_sample_manifest: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_q9995_v1/validation_windows.json
+wandb:
+  name: realworld_all4_ray0_absolute_wan21_q9995_ep8

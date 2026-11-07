@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - realworld_all4_original_fastwam_wan22_5b_ep8
+  - _self_
+
+output_dir: ./runs/realworld_stack_bowls_three_original_fastwam_wan22_5b_ep8/${now:%Y-%m-%d}_${now:%H-%M-%S}
+num_epochs: 8
+data:
+  train:
+    task_name: stack_bowls_three
+eval_num_samples: 2
+eval_sample_manifest: ./data/realworld_artifacts/stack_bowls_three_q9995_v1/validation_windows.json
+wandb:
+  name: realworld_stack_bowls_three_original_fastwam_wan22_5b_ep8

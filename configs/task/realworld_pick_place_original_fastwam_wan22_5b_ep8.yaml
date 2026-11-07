@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - realworld_all4_original_fastwam_wan22_5b_ep8
+  - _self_
+
+output_dir: ./runs/realworld_pick_place_original_fastwam_wan22_5b_ep8/${now:%Y-%m-%d}_${now:%H-%M-%S}
+num_epochs: 8
+data:
+  train:
+    task_name: pick_place
+eval_num_samples: 2
+eval_sample_manifest: ./data/realworld_artifacts/pick_place_q9995_v1/validation_windows.json
+wandb:
+  name: realworld_pick_place_original_fastwam_wan22_5b_ep8

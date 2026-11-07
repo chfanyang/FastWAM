@@ -1,0 +1,18 @@
+train:
+  _target_: fastwam.realworld.baseline_data.OriginalFastWAMDataset
+  dataset_dir: ./data/realworld_data
+  split_manifest: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_q9995_v1/split.json
+  pretrained_norm_stats: ./data/realworld_artifacts/original_fastwam_wan22_5b_left_wrist_val2_g08_q9995_v1/action_stats.json
+  text_embedding_cache_dir: ./data/realworld_artifacts/ray0_absolute_left_wrist_val2_g08_q9995_v1/text
+  split: train
+  task_name: null
+  include_text_context: true
+val:
+  _target_: ${data.train._target_}
+  dataset_dir: ${data.train.dataset_dir}
+  split_manifest: ${data.train.split_manifest}
+  pretrained_norm_stats: ${data.train.pretrained_norm_stats}
+  text_embedding_cache_dir: ${data.train.text_embedding_cache_dir}
+  split: val
+  task_name: ${data.train.task_name}
+  include_text_context: ${data.train.include_text_context}
