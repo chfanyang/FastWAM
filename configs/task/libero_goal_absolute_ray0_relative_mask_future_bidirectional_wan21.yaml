@@ -1,0 +1,25 @@
+# @package _global_
+# Absolute observed RAY0 + current-EE-relative future target poses.
+defaults:
+  - libero_goal_rothko_absolute_ray0_2cam224_full_wan21_1_3b_1e-4
+  - _self_
+output_dir: ./runs/libero_goal_absolute_ray0_relative_mask_future_bidirectional_wan21/${now:%Y-%m-%d_%H-%M-%S}
+batch_size: 4
+gradient_accumulation_steps: 4
+num_epochs: 10
+save_every: 2000
+state_save_every: 2000
+save_at_end: true
+eval_every: 1000
+eval_num_samples: 4
+data:
+  train:
+    latent_cache_dir: ./data/libero_goal_rothko_absolute_ray0_wan21_bf16_h16_latents_20260921
+    text_embedding_cache_dir: ./data/text_embeds_cache/libero_wan21_bf16_batch1
+model:
+  vae_safetensors_path: null
+  video_dit_config:
+    video_attention_mask_mode: rgb_raymap_future_bidirectional
+wandb:
+  name: libero_goal_absolute_ray0_relative_mask_future_bidirectional_wan21
+  group: libero_goal_absolute_ray0_relative_mask_20260924

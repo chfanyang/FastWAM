@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+  - libero_goal_rothko_absolute_ray0_2cam224_full_wan21_1_3b_1e-4
+  - _self_
+output_dir: ./runs/libero_goal_latent_repeat_absolute_ray0_wan21/${now:%Y-%m-%d}_${now:%H-%M-%S}
+gradient_accumulation_steps: 4
+data:
+  train:
+    _target_: fastwam.datasets.lerobot.libero_latent_repeat.LiberoLatentRepeatDataset
+    latent_cache_dir: ./data/libero_goal_rothko_absolute_ray0_wan21_bf16_h16_latents_20260921
+    text_embedding_cache_dir: ./data/text_embeds_cache/libero_wan21_bf16_batch1
+model:
+  _target_: fastwam.latent_repeat_runtime.create_libero_latent_repeat
+  loss:
+    lambda_rgb: 1.0
+    lambda_raymap: 5.0
+wandb:
+  name: libero_goal_latent_repeat_absolute_ray0_wan21
+  group: libero_goal_latent_repeat
