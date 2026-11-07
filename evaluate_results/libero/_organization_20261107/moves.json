@@ -1,0 +1,770 @@
+[
+  {
+    "old": "absolute_ray0_relative_axis_angle_constant100_20260925",
+    "new": "offline_audits/absolute_ray0_relative_axis_angle_constant100_20260925",
+    "inode": 9223372037191394440,
+    "device": 60
+  },
+  {
+    "old": "absolute_ray0_relative_repr100_20260923",
+    "new": "offline_audits/absolute_ray0_relative_repr100_20260923",
+    "inode": 9223372037190571768,
+    "device": 60
+  },
+  {
+    "old": "absolute_ray0_relative_repr100_vae8264_20260924",
+    "new": "offline_audits/absolute_ray0_relative_repr100_vae8264_20260924",
+    "inode": 9223372037190952754,
+    "device": 60
+  },
+  {
+    "old": "absolute_ray0_relative_repr100_vae8264_rothko_only_20260924",
+    "new": "offline_audits/absolute_ray0_relative_repr100_vae8264_rothko_only_20260924",
+    "inode": 9223372037190960833,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_decoder_preparation_padding_20260919",
+    "new": "preparation/all4_absolute_decoder_preparation_padding_20260919",
+    "inode": 9223372037189740826,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_local_prepare_20260918",
+    "new": "preparation/all4_absolute_local_prepare_20260918",
+    "inode": 9223372037189526147,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_prepare_20260917",
+    "new": "preparation/all4_absolute_prepare_20260917",
+    "inode": 9223372037189415272,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_ray0_decoder_cpu.log",
+    "new": "launch_records/all4_absolute_ray0_decoder_cpu.log",
+    "inode": 133242812,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_ray0_decoder_nopad_cpu.log",
+    "new": "launch_records/all4_absolute_ray0_decoder_nopad_cpu.log",
+    "inode": 133248523,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_ray0_decoder_nopad_prepare.log",
+    "new": "launch_records/all4_absolute_ray0_decoder_nopad_prepare.log",
+    "inode": 133255175,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_ray0_decoder_preparation_20260923",
+    "new": "preparation/all4_absolute_ray0_decoder_preparation_20260923",
+    "inode": 9223372037190538543,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_ray0_decoder_preparation_nopadloss_20260923",
+    "new": "preparation/all4_absolute_ray0_decoder_preparation_nopadloss_20260923",
+    "inode": 9223372037190535853,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_ray0_decoder_preparation_val400_20260923",
+    "new": "preparation/all4_absolute_ray0_decoder_preparation_val400_20260923",
+    "inode": 9223372037190546652,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_ray0_decoder_prepare.log",
+    "new": "launch_records/all4_absolute_ray0_decoder_prepare.log",
+    "inode": 133252456,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_ray0_decoder_val400_prepare.log",
+    "new": "launch_records/all4_absolute_ray0_decoder_val400_prepare.log",
+    "inode": 133255317,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_ray0_vae_latest_launch.txt",
+    "new": "launch_records/all4_absolute_ray0_vae_latest_launch.txt",
+    "inode": 133255420,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_ray0_vae_launch_20260923_013046",
+    "new": "launch_records/all4_absolute_ray0_vae_launch_20260923_013046",
+    "inode": 9223372037190548714,
+    "device": 60
+  },
+  {
+    "old": "all4_absolute_review_20260917",
+    "new": "preparation/all4_absolute_review_20260917",
+    "inode": 9223372037189416410,
+    "device": 60
+  },
+  {
+    "old": "all4_cache_2gpu_latest_launch.txt",
+    "new": "launch_records/all4_cache_2gpu_latest_launch.txt",
+    "inode": 132582215,
+    "device": 60
+  },
+  {
+    "old": "all4_cache_2gpu_launch_20260919_164305",
+    "new": "launch_records/all4_cache_2gpu_launch_20260919_164305",
+    "inode": 9223372037189813366,
+    "device": 60
+  },
+  {
+    "old": "all4_cache_6gpu_latest_launch.txt",
+    "new": "launch_records/all4_cache_6gpu_latest_launch.txt",
+    "inode": 132590572,
+    "device": 60
+  },
+  {
+    "old": "all4_cache_6gpu_resume_20260920_013001",
+    "new": "launch_records/all4_cache_6gpu_resume_20260920_013001",
+    "inode": 9223372037189822235,
+    "device": 60
+  },
+  {
+    "old": "all4_step21700_vae8264_robustJoint_replan8_ep50_20260924",
+    "new": "closed_loop/all4_step21700_vae8264_robustJoint_replan8_ep50_20260924",
+    "inode": 9223372037191170843,
+    "device": 60
+  },
+  {
+    "old": "all4_step21700_vae8264_robustJoint_replan8_ep50_20260924_startup_6h_archived",
+    "new": "archive/failed_or_withdrawn/all4_step21700_vae8264_robustJoint_replan8_ep50_20260924_startup_6h_archived",
+    "inode": 9223372037191168480,
+    "device": 60
+  },
+  {
+    "old": "all4_step21700_vae8264_robustJoint_replan8_ep50_20260924_startup_import_failure",
+    "new": "archive/failed_or_withdrawn/all4_step21700_vae8264_robustJoint_replan8_ep50_20260924_startup_import_failure",
+    "inode": 9223372037191169757,
+    "device": 60
+  },
+  {
+    "old": "all4_step21700_vae8264_robustJoint_smoke_20260924",
+    "new": "preparation/all4_step21700_vae8264_robustJoint_smoke_20260924",
+    "inode": 9223372037191178419,
+    "device": 60
+  },
+  {
+    "old": "cachetmp",
+    "new": "archive/temporary/cachetmp",
+    "inode": 9223372037190200612,
+    "device": 60
+  },
+  {
+    "old": "flatten_layout_preview_20260918",
+    "new": "offline_audits/flatten_layout_preview_20260918",
+    "inode": 9223372037189529319,
+    "device": 60
+  },
+  {
+    "old": "goal24_eval_latest_launch.txt",
+    "new": "launch_records/goal24_eval_latest_launch.txt",
+    "inode": 132598929,
+    "device": 60
+  },
+  {
+    "old": "goal24_eval_launch_20260920_111156",
+    "new": "launch_records/goal24_eval_launch_20260920_111156",
+    "inode": 9223372037189893897,
+    "device": 60
+  },
+  {
+    "old": "goal24_launch_20260920",
+    "new": "launch_records/goal24_launch_20260920",
+    "inode": 9223372037189894178,
+    "device": 60
+  },
+  {
+    "old": "goal24_norm_check_20260920",
+    "new": "preparation/goal24_norm_check_20260920",
+    "inode": 9223372037189968234,
+    "device": 60
+  },
+  {
+    "old": "goal24_norm_quantiles_20260920",
+    "new": "preparation/goal24_norm_quantiles_20260920",
+    "inode": 9223372037189969131,
+    "device": 60
+  },
+  {
+    "old": "goal25_vae_latest_launch.txt",
+    "new": "launch_records/goal25_vae_latest_launch.txt",
+    "inode": 132603137,
+    "device": 60
+  },
+  {
+    "old": "goal25_vae_launch_20260920_130306",
+    "new": "launch_records/goal25_vae_launch_20260920_130306",
+    "inode": 9223372037189992149,
+    "device": 60
+  },
+  {
+    "old": "goal_absolute_decoder_preparation_20260919",
+    "new": "preparation/goal_absolute_decoder_preparation_20260919",
+    "inode": 9223372037189733894,
+    "device": 60
+  },
+  {
+    "old": "goal_absolute_decoder_preparation_padding_20260919",
+    "new": "preparation/goal_absolute_decoder_preparation_padding_20260919",
+    "inode": 9223372037189742972,
+    "device": 60
+  },
+  {
+    "old": "goal_absolute_ray0_wan21_cache_launch_20260921",
+    "new": "launch_records/goal_absolute_ray0_wan21_cache_launch_20260921",
+    "inode": 9223372037190210041,
+    "device": 60
+  },
+  {
+    "old": "goal_absolute_ray0_wan21_eval_latest_launch.txt",
+    "new": "launch_records/goal_absolute_ray0_wan21_eval_latest_launch.txt",
+    "inode": 132619785,
+    "device": 60
+  },
+  {
+    "old": "goal_absolute_ray0_wan21_eval_launch_20260922_030627",
+    "new": "launch_records/goal_absolute_ray0_wan21_eval_launch_20260922_030627",
+    "inode": 9223372037190269159,
+    "device": 60
+  },
+  {
+    "old": "goal_absolute_ray0_wan21_step4140_original_replan8_ep50_20260922_030627",
+    "new": "closed_loop/goal_absolute_ray0_wan21_step4140_original_replan8_ep50_20260922_030627",
+    "inode": 9223372037190257808,
+    "device": 60
+  },
+  {
+    "old": "goal_absolute_ray0_wan21_step4140_vae8264_replan8_ep50_20260923_202057",
+    "new": "closed_loop/goal_absolute_ray0_wan21_step4140_vae8264_replan8_ep50_20260923_202057",
+    "inode": 9223372037190811878,
+    "device": 60
+  },
+  {
+    "old": "goal_absolute_ray0_wan21_train_latest_launch.txt",
+    "new": "launch_records/goal_absolute_ray0_wan21_train_latest_launch.txt",
+    "inode": 132619318,
+    "device": 60
+  },
+  {
+    "old": "goal_absolute_ray0_wan21_train_launch_2026-09-21_18-42-23",
+    "new": "launch_records/goal_absolute_ray0_wan21_train_launch_2026-09-21_18-42-23",
+    "inode": 9223372037190215025,
+    "device": 60
+  },
+  {
+    "old": "goal_absolute_ray0_wan21_vae8264_eval_latest_launch.txt",
+    "new": "launch_records/goal_absolute_ray0_wan21_vae8264_eval_latest_launch.txt",
+    "inode": 133294602,
+    "device": 60
+  },
+  {
+    "old": "goal_absolute_ray0_wan21_vae8264_eval_launch_20260923_202057",
+    "new": "launch_records/goal_absolute_ray0_wan21_vae8264_eval_launch_20260923_202057",
+    "inode": 9223372037190808324,
+    "device": 60
+  },
+  {
+    "old": "goal_latent_repeat_train_latest_launch.txt",
+    "new": "launch_records/goal_latent_repeat_train_latest_launch.txt",
+    "inode": 132647743,
+    "device": 60
+  },
+  {
+    "old": "goal_latent_repeat_train_launch_2026-09-22_04-57-27",
+    "new": "launch_records/goal_latent_repeat_train_launch_2026-09-22_04-57-27",
+    "inode": 9223372037190270682,
+    "device": 60
+  },
+  {
+    "old": "goal_latent_repeat_train_launch_2026-09-22_06-34-36",
+    "new": "launch_records/goal_latent_repeat_train_launch_2026-09-22_06-34-36",
+    "inode": 9223372037190306249,
+    "device": 60
+  },
+  {
+    "old": "goal_mask_gpu_20260919",
+    "new": "preparation/goal_mask_gpu_20260919",
+    "inode": 9223372037189773386,
+    "device": 60
+  },
+  {
+    "old": "goal_mask_implementation_20260919",
+    "new": "preparation/goal_mask_implementation_20260919",
+    "inode": 9223372037189732457,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_decoder_preparation_20260921",
+    "new": "preparation/goal_osc_decoder_preparation_20260921",
+    "inode": 9223372037190182314,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_delta_cache_latest_launch.txt",
+    "new": "launch_records/goal_osc_delta_cache_latest_launch.txt",
+    "inode": 132628717,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_delta_cache_launch_20260920_152924",
+    "new": "launch_records/goal_osc_delta_cache_launch_20260920_152924",
+    "inode": 9223372037190062878,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_delta_cache_smoke_20260920",
+    "new": "preparation/goal_osc_delta_cache_smoke_20260920",
+    "inode": 9223372037190056560,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_delta_cache_smoke_20260920.log",
+    "new": "launch_records/goal_osc_delta_cache_smoke_20260920.log",
+    "inode": 132628669,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_delta_preparation_20260920",
+    "new": "preparation/goal_osc_delta_preparation_20260920",
+    "inode": 9223372037190056445,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_delta_stats_20260920.log",
+    "new": "launch_records/goal_osc_delta_stats_20260920.log",
+    "inode": 132628648,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_delta_vae_audit_20260920",
+    "new": "offline_audits/goal_osc_delta_vae_audit_20260920",
+    "inode": 9223372037190066374,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_delta_vae_audit_20260920.log",
+    "new": "launch_records/goal_osc_delta_vae_audit_20260920.log",
+    "inode": 132625072,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_eval_latest_launch.txt",
+    "new": "launch_records/goal_osc_eval_latest_launch.txt",
+    "inode": 132629797,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_eval_launch_20260921_141230",
+    "new": "launch_records/goal_osc_eval_launch_20260921_141230",
+    "inode": 9223372037190169612,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_learning_check_20260921",
+    "new": "offline_audits/goal_osc_learning_check_20260921",
+    "inode": 9223372037190121396,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_robust30_20260921",
+    "new": "offline_audits/goal_osc_robust30_20260921",
+    "inode": 9223372037190173869,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_step4140_effective30_20260921_141230",
+    "new": "offline_audits/goal_osc_step4140_effective30_20260921_141230",
+    "inode": 9223372037190159681,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_step4140_original_replan8_ep50_20260921_141230",
+    "new": "closed_loop/goal_osc_step4140_original_replan8_ep50_20260921_141230",
+    "inode": 9223372037190160327,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_step4140_vae400_replan8_tasks1234569_ep50_20260921",
+    "new": "closed_loop/goal_osc_step4140_vae400_replan8_tasks1234569_ep50_20260921",
+    "inode": 9223372037190199385,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_train_latest_launch.txt",
+    "new": "launch_records/goal_osc_train_latest_launch.txt",
+    "inode": 132617647,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_train_launch_2026-09-21_05-39-41",
+    "new": "launch_records/goal_osc_train_launch_2026-09-21_05-39-41",
+    "inode": 9223372037190094747,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_vae400_eval_launch_20260921",
+    "new": "launch_records/goal_osc_vae400_eval_launch_20260921",
+    "inode": 9223372037190199150,
+    "device": 60
+  },
+  {
+    "old": "goal_osc_vae_launch_20260921",
+    "new": "launch_records/goal_osc_vae_launch_20260921",
+    "inode": 9223372037190190744,
+    "device": 60
+  },
+  {
+    "old": "goal_relative_mask_decoupled_step4140_original_replan8_ep50_20260925",
+    "new": "closed_loop/goal_relative_mask_decoupled_step4140_original_replan8_ep50_20260925",
+    "inode": 9223372037191371856,
+    "device": 60
+  },
+  {
+    "old": "goal_relative_mask_eval_20260925",
+    "new": "preparation/goal_relative_mask_eval_20260925",
+    "inode": 9223372037191371759,
+    "device": 60
+  },
+  {
+    "old": "goal_relative_mask_launch_20260924",
+    "new": "launch_records/goal_relative_mask_launch_20260924",
+    "inode": 9223372037191336206,
+    "device": 60
+  },
+  {
+    "old": "goal_repr_50episodes_chw_20260919",
+    "new": "offline_audits/goal_repr_50episodes_chw_20260919",
+    "inode": 9223372037189706411,
+    "device": 60
+  },
+  {
+    "old": "goal_table_absolute_cache_latest_launch.txt",
+    "new": "launch_records/goal_table_absolute_cache_latest_launch.txt",
+    "inode": 132616149,
+    "device": 60
+  },
+  {
+    "old": "goal_table_absolute_cache_launch_20260920_145712",
+    "new": "launch_records/goal_table_absolute_cache_launch_20260920_145712",
+    "inode": 9223372037190044843,
+    "device": 60
+  },
+  {
+    "old": "goal_table_absolute_cache_restart_20260920_150039",
+    "new": "launch_records/goal_table_absolute_cache_restart_20260920_150039",
+    "inode": 9223372037190051259,
+    "device": 60
+  },
+  {
+    "old": "goal_table_absolute_cache_smoke_20260920",
+    "new": "preparation/goal_table_absolute_cache_smoke_20260920",
+    "inode": 9223372037190049145,
+    "device": 60
+  },
+  {
+    "old": "goal_table_absolute_cache_smoke_20260920.log",
+    "new": "launch_records/goal_table_absolute_cache_smoke_20260920.log",
+    "inode": 132616100,
+    "device": 60
+  },
+  {
+    "old": "goal_table_absolute_preparation_20260920",
+    "new": "preparation/goal_table_absolute_preparation_20260920",
+    "inode": 9223372037190048799,
+    "device": 60
+  },
+  {
+    "old": "goal_table_absolute_stats_20260920.log",
+    "new": "launch_records/goal_table_absolute_stats_20260920.log",
+    "inode": 132616063,
+    "device": 60
+  },
+  {
+    "old": "goal_table_absolute_vae_audit_20260920",
+    "new": "offline_audits/goal_table_absolute_vae_audit_20260920",
+    "inode": 9223372037190049865,
+    "device": 60
+  },
+  {
+    "old": "goal_table_absolute_vae_audit_20260920.log",
+    "new": "launch_records/goal_table_absolute_vae_audit_20260920.log",
+    "inode": 132616101,
+    "device": 60
+  },
+  {
+    "old": "gtabletmp",
+    "new": "archive/temporary/gtabletmp",
+    "inode": 9223372037190053953,
+    "device": 60
+  },
+  {
+    "old": "latent_repeat_3090_prepare_20260922_135110",
+    "new": "launch_records/latent_repeat_3090_prepare_20260922_135110",
+    "inode": 9223372037190456391,
+    "device": 60
+  },
+  {
+    "old": "latent_repeat_3090_prepare_latest.txt",
+    "new": "launch_records/latent_repeat_3090_prepare_latest.txt",
+    "inode": 133126836,
+    "device": 60
+  },
+  {
+    "old": "latent_repeat_e2e_20260922_062604",
+    "new": "preparation/latent_repeat_e2e_20260922_062604",
+    "inode": 9223372037190288820,
+    "device": 60
+  },
+  {
+    "old": "latent_repeat_e2e_latest.txt",
+    "new": "launch_records/latent_repeat_e2e_latest.txt",
+    "inode": 132643323,
+    "device": 60
+  },
+  {
+    "old": "latent_repeat_smoke_20260922",
+    "new": "preparation/latent_repeat_smoke_20260922",
+    "inode": 9223372037190270533,
+    "device": 60
+  },
+  {
+    "old": "latent_repeat_validation_fix_20260922",
+    "new": "preparation/latent_repeat_validation_fix_20260922",
+    "inode": 9223372037190286713,
+    "device": 60
+  },
+  {
+    "old": "launch_absolute_ray0_8270_20260916_041602",
+    "new": "launch_records/launch_absolute_ray0_8270_20260916_041602",
+    "inode": 9223372037189007633,
+    "device": 60
+  },
+  {
+    "old": "launch_goal_absolute_wan21_20260916_053905",
+    "new": "launch_records/launch_goal_absolute_wan21_20260916_053905",
+    "inode": 9223372037189051169,
+    "device": 60
+  },
+  {
+    "old": "libero_all4_rothko_2cam224_full_1e-4",
+    "new": "closed_loop/libero_all4_rothko_2cam224_full_1e-4",
+    "inode": 9223372037177418826,
+    "device": 60
+  },
+  {
+    "old": "libero_all4_rothko_2cam224_full_from21700_ep2_1e-4",
+    "new": "closed_loop/libero_all4_rothko_2cam224_full_from21700_ep2_1e-4",
+    "inode": 9223372037187767687,
+    "device": 60
+  },
+  {
+    "old": "libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4",
+    "new": "closed_loop/libero_all4_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4",
+    "inode": 9223372037184469329,
+    "device": 60
+  },
+  {
+    "old": "libero_all4_rothko_centerfrac06_2cam224_full_wan21_1_3b_1e-4",
+    "new": "closed_loop/libero_all4_rothko_centerfrac06_2cam224_full_wan21_1_3b_1e-4",
+    "inode": 9223372037181022208,
+    "device": 60
+  },
+  {
+    "old": "libero_goal_rothko_2cam224_full_1e-4",
+    "new": "closed_loop/libero_goal_rothko_2cam224_full_1e-4",
+    "inode": 9223372037108226746,
+    "device": 60
+  },
+  {
+    "old": "libero_goal_rothko_absolute_ray0_2cam224_full_wan22_5b_1e-4",
+    "new": "closed_loop/libero_goal_rothko_absolute_ray0_2cam224_full_wan22_5b_1e-4",
+    "inode": 9223372037189011419,
+    "device": 60
+  },
+  {
+    "old": "libero_goal_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4",
+    "new": "closed_loop/libero_goal_rothko_centerfrac05_2cam224_full_wan21_1_3b_1e-4",
+    "inode": 9223372037180472965,
+    "device": 60
+  },
+  {
+    "old": "libero_goal_rothko_centerfrac05_2cam224_full_wan22_5b_train_rgb_aux_ray_only_1e-4",
+    "new": "closed_loop/libero_goal_rothko_centerfrac05_2cam224_full_wan22_5b_train_rgb_aux_ray_only_1e-4",
+    "inode": 9223372037183622812,
+    "device": 60
+  },
+  {
+    "old": "libero_goal_rothko_centerfrac06_2cam224_full_1e-4",
+    "new": "closed_loop/libero_goal_rothko_centerfrac06_2cam224_full_1e-4",
+    "inode": 9223372037111442294,
+    "device": 60
+  },
+  {
+    "old": "libero_goal_rothko_centerfrac06_2cam224_full_wan21_1_3b_1e-4",
+    "new": "closed_loop/libero_goal_rothko_centerfrac06_2cam224_full_wan21_1_3b_1e-4",
+    "inode": 9223372037179634900,
+    "device": 60
+  },
+  {
+    "old": "libero_goal_rothko_centerfrac06_2cam224_full_wan21_1_3b_channel_1e-4",
+    "new": "closed_loop/libero_goal_rothko_centerfrac06_2cam224_full_wan21_1_3b_channel_1e-4",
+    "inode": 9223372037181445337,
+    "device": 60
+  },
+  {
+    "old": "libero_rothko_2cam224_lora_r64_attn_ffn_1e-4",
+    "new": "closed_loop/libero_rothko_2cam224_lora_r64_attn_ffn_1e-4",
+    "inode": 9223372037107739892,
+    "device": 60
+  },
+  {
+    "old": "osc_increment_bounds_20260920",
+    "new": "preparation/osc_increment_bounds_20260920",
+    "inode": 9223372037190052883,
+    "device": 60
+  },
+  {
+    "old": "osc_norm_recheck_20260920",
+    "new": "preparation/osc_norm_recheck_20260920",
+    "inode": 9223372037190065056,
+    "device": 60
+  },
+  {
+    "old": "osc_pipeline_review_20260920",
+    "new": "preparation/osc_pipeline_review_20260920",
+    "inode": 9223372037190087107,
+    "device": 60
+  },
+  {
+    "old": "osc_repr100_20260921",
+    "new": "offline_audits/osc_repr100_20260921",
+    "inode": 9223372037190186408,
+    "device": 60
+  },
+  {
+    "old": "osc_validation_coverage_20260920",
+    "new": "preparation/osc_validation_coverage_20260920",
+    "inode": 9223372037190089310,
+    "device": 60
+  },
+  {
+    "old": "oscevaltmp",
+    "new": "archive/temporary/oscevaltmp",
+    "inode": 9223372037190165883,
+    "device": 60
+  },
+  {
+    "old": "osctmp",
+    "new": "archive/temporary/osctmp",
+    "inode": 9223372037190066176,
+    "device": 60
+  },
+  {
+    "old": "osctrain_tmp",
+    "new": "archive/temporary/osctrain_tmp",
+    "inode": 9223372037190100187,
+    "device": 60
+  },
+  {
+    "old": "preflight_all4_20260919",
+    "new": "preparation/preflight_all4_20260919",
+    "inode": 9223372037189745497,
+    "device": 60
+  },
+  {
+    "old": "ray0tmp",
+    "new": "archive/temporary/ray0tmp",
+    "inode": 9223372037190212724,
+    "device": 60
+  },
+  {
+    "old": "representation_roundtrip_20260919",
+    "new": "offline_audits/representation_roundtrip_20260919",
+    "inode": 9223372037189684603,
+    "device": 60
+  },
+  {
+    "old": "representation_roundtrip_20260919_contract",
+    "new": "offline_audits/representation_roundtrip_20260919_contract",
+    "inode": 9223372037189697031,
+    "device": 60
+  },
+  {
+    "old": "representation_roundtrip_20260919_control",
+    "new": "offline_audits/representation_roundtrip_20260919_control",
+    "inode": 9223372037189696270,
+    "device": 60
+  },
+  {
+    "old": "representation_roundtrip_chw_20260919",
+    "new": "offline_audits/representation_roundtrip_chw_20260919",
+    "inode": 9223372037189702466,
+    "device": 60
+  },
+  {
+    "old": "shuffled_goal_prepare_20260925",
+    "new": "preparation/shuffled_goal_prepare_20260925",
+    "inode": 9223372037191484384,
+    "device": 60
+  },
+  {
+    "old": "suite_z_origin_20260920",
+    "new": "preparation/suite_z_origin_20260920",
+    "inode": 9223372037190027515,
+    "device": 60
+  },
+  {
+    "old": "table_height_geometry_audit_20260920",
+    "new": "preparation/table_height_geometry_audit_20260920",
+    "inode": 9223372037190036197,
+    "device": 60
+  },
+  {
+    "old": "table_height_norm_20260920",
+    "new": "preparation/table_height_norm_20260920",
+    "inode": 9223372037190034136,
+    "device": 60
+  },
+  {
+    "old": "text_batch1_20260919",
+    "new": "preparation/text_batch1_20260919",
+    "inode": 9223372037189746253,
+    "device": 60
+  },
+  {
+    "old": "vae8264_alphabet_soup_random100_20260924",
+    "new": "offline_audits/vae8264_alphabet_soup_random100_20260924",
+    "inode": 9223372037191175485,
+    "device": 60
+  },
+  {
+    "old": "vae8264_object_goal_10windows_per_task_20260924",
+    "new": "offline_audits/vae8264_object_goal_10windows_per_task_20260924",
+    "inode": 9223372037191182459,
+    "device": 60
+  },
+  {
+    "old": "w21tmp053905",
+    "new": "archive/temporary/w21tmp053905",
+    "inode": 9223372037189041809,
+    "device": 60
+  },
+  {
+    "old": "withdraw_table_absolute_20260920_152042",
+    "new": "archive/failed_or_withdrawn/withdraw_table_absolute_20260920_152042",
+    "inode": 9223372037190055866,
+    "device": 60
+  }
+]
