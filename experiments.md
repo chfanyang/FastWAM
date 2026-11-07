@@ -172,19 +172,19 @@ Latent-Repeat 已对照本地 `third_party/cosmos-policy` 代码：采用相同�
 
 - 表示消融（2.1）沿用基线 mask；mask 消融（2.2–2.3）沿用基线 Rothko 表示。
 - 四组使用同一 Goal 数据范围、窗口采样、horizon、位姿目标语义、归一化物理范围、RGB 输入与条件信息。
-- 四组统一模型初始化、训练预算、有效 batch、优化器、学习率计划、训练 seed，以及最终 checkpoint 选择规则，按上面的已确认设置执行。Latent-Repeat 的 action loss 权重另按用户确认设为 1，其他组为 5；因此该组对比同时涉及表示和动作 loss 权重，不能表述为严格只改变表示。
+- 四组统一模型初始化、训练预算、有效 batch、优化器、学习率计划、训练 seed，以及最终 checkpoint 选择规则，按上面的已确认设置执行。2026-09-22 用户更新：Latent-Repeat 同样使用 action loss 权重5，RGB/action=1:5。
 - 四组闭环测试场景、seed、每任务 episode 数、replan、去噪步数和夹爪处理均沿用上述已确认的既有 Goal 协议；报告 Goal 各任务及整体成功率与分母。
 - Latent-Repeat 的位姿语义、数值铺排和读取规则按下述定义执行。
 - Latent-Repeat 的向量、布局和读取方案已确认，见下方；实现时核对训练目标、当前条件和推理读取使用同一规则。
 - 两种 mask 的连接定义已确认，见下方矩阵；实现时需检查每层都保持条件 token 不读取未来，避免 Decoupled 经条件 token 间接交换信息。
-- RGB 与动作均保留监督；Latent-Repeat 使用 RGB/action 权重 1/1，保留 Wan 基线扩散目标与分模态求均值方式，不额外做 latent 方差匹配。其动作 latent 尺度与 VAE latent 不同，不能直接用不同表示间的原始 loss 大小评价优劣。
+- RGB 与动作均保留监督；Latent-Repeat 使用 RGB/action 权重 1/5，保留 Wan 基线扩散目标与分模态求均值方式，不额外做 latent 方差匹配。其动作 latent 尺度与 VAE latent 不同，不能直接用不同表示间的原始 loss 大小评价优劣。
 
 ### Latent-Repeat：Cosmos 思想的 Wan 适配（已确认）
 
-- **Loss 已确认**：RGB/action 权重为 **1/1**，即 `loss_rgb + loss_action`，不将 action loss 乘 5；保留 Wan 的扩散训练目标、噪声／时间权重和分模态求均值方式，不额外做 latent 方差匹配。参考本地 Cosmos Policy 默认 `action_loss_multiplier=1`，但不声称完整复现其 EDM loss 或整体聚合方式。
+- **Loss 已更新（2026-09-22）**：RGB/action 权重为 **1/5**，即 `loss_rgb + 5 * loss_action`，与本轮基线一致；保留 Wan 的扩散训练目标、噪声／时间权重和分模态求均值方式，不额外做 latent 方差匹配。参考本地 Cosmos Policy 默认 `action_loss_multiplier=1`，但不声称完整复现其 EDM loss 或整体聚合方式。
 
 - 保留基线 `[rgb0–4 | ray0–4]` latent 布局和 attention mask，不缩减未来动作 latent 帧数；每个动作 latent 帧形状为 `[16,28,56]`，共 25,088 个标量。
-- 使用归一化8维绝对动作向量 `[x,y,z,qw,qx,qy,qz,gripper]`：XYZ 按基线绝对位置 bounds 线性映射到 `[-1,1]`；四元数归一化为单位四元数；gripper 从 `[0,1]` 映射到 `[-1,1]`。不再套用 VAE latent 均值／标准差变换。
+- 2026-09-22 本轮改以 absolute-RAY0＋未来相对目标 Wan2.1 为基线。使用8维向量 `[x,y,z,qw,qx,qy,qz,gripper]`：RAY0 XYZ按四-suite绝对 observation min/max映射；未来XYZ先变换为 `R0^T(p_target-p0)`，再按旧共享Q99.95对称 bounds映射到 `[-1,1]`；未来旋转为 `R0^T R_target`；四元数归一化为单位四元数；gripper 从 `[0,1]` 映射到 `[-1,1]`。不再套用 VAE latent 均值／标准差变换。
 - 四元数逐帧统一符号：令 `qw >= 0`；若 `qw == 0`，令 `(qx,qy,qz)` 中第一个非零分量为正，不采用随窗口变化的符号选择。该约定不保证跨180°时分量连续。读取后重新归一化，范数接近零时须有数值保护并记录退化样本。
 - `ray0`：当前 EE 位姿和当前 gripper，8 维向量 repeat 3,136 次，按 CHW reshape 为 `[16,28,56]`；作为干净条件，不包含未来动作。
 - `ray1`：未来动作第 1–4 步；`ray2`：第 5–8 步；`ray3`：第 9–12 步；`ray4`：第 13–16 步。这里是显式动作分组，不声称等同于 VAE 的时间感受野。
@@ -391,3 +391,124 @@ ray4     1    1    1    1    1 |   1    1    1    1    1
 - 用户授权使用远端GPU0/3/4/5/6/7，不使用GPU1/2。先停止原两卡全部进程，再清理2个未完成partial文件；227个完整shard（232,448窗口）保留，剩余45个shard。
 - 同一输出目录、原始VAE、BF16、每进程batch8/workers4、每shard1024保持不变。底层缓存脚本检查原metadata后将剩余shard分配给6个rank。
 - tmux：`libero_all4_absolute_cache_6gpu`。启动/清理记录、原metadata快照和日志：`evaluate_results/libero/all4_cache_6gpu_resume_20260920_013001/`。最终仍需通过latent逐位与training_loss一致性校验才算完成。
+
+## Goal 原始 OSC 增量对照（2026-09-20）
+
+用户取消“减桌高＋统一stats”，其代码已撤回到`4d2c60e`并归档，本机8卡该缓存作业已停止。历史数据/结果保留。当前改为独立`libero_rothko_osc_delta`：RAY0使用原始世界state，未来直接编码原始OSC平移/旋转命令；不减桌高、不分suite归一化、不重建绝对target。state bounds按全4suite当前state极值+每侧1cm，未来平移固定±5cm、旋转向量命令scale0.5rad。eval直接恢复OSC命令，保持控制器原逻辑，禁用绝对位姿ensemble。
+
+Task `libero_goal_rothko_osc_delta_2cam224_full_wan21_1_3b_1e-4`，Eval `sim_libero_goal_osc_delta`。Wan2.1原始冻结VAE，预算保持原Goal10epoch、8卡bs4/GA4、LR1e-4、warmup5%、验证1000、保存2000+最终、baseline mask和RGB/action1:5。先做编解码与小缓存验证，再正式8卡缓存；训练启动前确认参数。
+详见 [Goal OSC runbook](experiments/libero/GOAL_OSC_DELTA_RUNBOOK.md)。
+
+原始OSC方案预检通过：30项回归、实际eval helper、20窗口原始VAE重建与16窗口真实training_loss一致性。已启动本机tmux `libero_goal_osc_cache`，8卡计算52,895窗口新缓存，batch2/每rank两个数据worker；训练未启动。
+
+
+### OSC 两机分工（2026-09-20）
+
+- 本机 ainode07：计算 Goal 缓存，之后只训练 Goal。
+- 远端 ainode06（172.16.12.6）：计算 spatial/object/10 三个 suite 缓存，再接收本机已完成且验证通过的 Goal 缓存，合并后训练四个 suite。
+- 两端原始 Wan2.1 VAE SHA256、19个源文件、stats 指纹、数据元信息及 PyTorch 版本已核对一致；沿用同一原始 OSC 表示。预检记录：`video_a800/osc_delta_sync_20260920/preflight.json`。
+- 已停止远端旧 Goal 全绝对 VAE 训练；`checkpoint_latest.pt` 的实际 step=1200，含 optimizer/scheduler，未删除历史结果。
+- 远端缓存 tmux：`libero_other3_osc_cache`；8卡，每rank batch2、2个数据worker，线程数2；224,818窗口。日志：`evaluate_results/libero/other3_osc_delta_cache_launch_20260920/cache.log`。
+- 远端三-suite task：`libero_other3_rothko_osc_delta_2cam224_wan21_cache`；训练四-suite task：`libero_all4_rothko_osc_delta_2cam224_full_wan21_1_3b_1e-4`。
+- Goal 缓存传输尚未完成。合并使用 `scripts/merge_libero_osc_caches.py`，按 spatial/object/goal/10 索引顺序逐字节重排分片，不重新编码；合并后必须运行标准缓存入口完成在线 latent/training_loss 验证才能用于训练。不能直接拼 metadata 或重命名分片。
+- 此次只启动缓存；两台正式 DiT 训练均未启动，启动前确认训练参数。
+
+
+### 2026-09-20 OSC 流程复核：补零语义已确认
+
+用户明确：未来预测的是逐步 OSC 增量，尾部 padding 的平移／旋转应补零，夹爪保持最后值；RGB/state 仍重复末帧。当前 processor 符合该语义。此前把它误判成必须 edge-repeat 动作并要求重算的结论撤回；不应用 delta_action_dim_mask=null，不因此停止／重算缓存。raw/action tensor 共享确实存在，后续修改 processor 时需要留意，但当前结果符合要求。
+
+本机 Goal 完整缓存已通过：indices 0/26447/52894 在线 latent 逐位一致，固定 seed123456 的 training_loss 逐位一致（1.1243473291397095），complete=true、_SUCCESS。远端缓存及四-suite合并后的实际校验、八卡训练／保存恢复仍待完成。训练内验证使用训练集前4窗口，四-suite中仅覆盖spatial，不是独立held-out验证。详见 `evaluate_results/libero/osc_pipeline_review_20260920/REPORT.md`。
+
+
+### 2026-09-20：扩大新 OSC 训练内验证覆盖
+
+- Goal：全部10任务，每任务3个不同episode，各取开头／中段／尾部一个窗口，共30窗口。
+- 四-suite：全部40任务，每任务同样3窗口，共120窗口；suite顺序spatial/object/goal/10。
+- 尾部窗口保留8个有效动作＋8个padding动作；OSC padding平移旋转补零、夹爪保持。其余两类窗口16步有效。
+- 每1000 optimizer steps验证，20步去噪；固定窗口与seed(42+清单序号)，8卡轮流分摊（Goal每卡3–4窗口，四-suite每卡15窗口），每个窗口均计算loss和推理指标。总耗时会增加，实际耗时待第一次运行测量。
+- 新选项eval_sample_indices仅两份OSC训练配置启用；旧配置未设置时保持原连续索引逻辑。原held-out manifest分支不变；训练样本、缓存、loss、保存间隔不变。
+- 这是训练集固定probe，不是独立held-out验证。清单：configs/validation/libero_goal_osc_probes.json、libero_all4_osc_probes.json；可复现生成脚本scripts/prepare_libero_osc_validation.py。
+
+### 2026-09-22：Latent-Repeat 隔离试验
+
+- 用户要求不影响现有代码：仅新增 `libero_latent_repeat` 表示、数据适配器、模型子类、独立factory与task配置。原模型／数据／评测入口不修改，只有选择新task才启用。
+- 配置 `configs/task/libero_goal_latent_repeat_absolute_ray0_wan21.yaml`：8卡batch4/GA4，有效128，10epoch/4140步，原始冻结Wan2.1 VAE仅用于RGB；mask与扩散loss继承当前基线，RGB/action=1:5。
+- 直接复用20260921完成的Goal缓存的RGB部分；动作侧读取原始数据中的当前state和重建OSC目标，生成数值repeat tensor，不使用缓存中的Rothko latent。尾部目标继续沿用基线edge-repeat，保留原latent分组padding loss口径。
+- 诊断脚本 `scripts/audit_libero_latent_repeat.py`，输出 `evaluate_results/libero/latent_repeat_smoke_20260922/`。正式训练未启动；诊断结果以该目录报告为准。
+
+- 隔离诊断已通过：9项新测试＋5项原absolute-RAY0回归；5个真实窗口数值恢复与基线直接编解码一致；1次完整DiT参数更新＋20步去噪通过。缓存训练VAE调用0次，推理仅当前RGB encode1次、decode0次，峰值19.263GiB。详见 `evaluate_results/libero/latent_repeat_smoke_20260922/REPORT.md`；仍未启动正式训练。
+
+- **2026-09-22 04:57 UTC 已启动正式Latent-Repeat训练**：本机8卡batch4/GA4，有效128，10epoch/4140步，RGB/action=1:5；tmux `libero_goal_latent_repeat_train`；run `runs/libero_goal_latent_repeat_absolute_ray0_wan21/2026-09-22_04-57-27`；启动日志 `evaluate_results/libero/goal_latent_repeat_train_launch_2026-09-22_04-57-27/`。W&B run `1w6rqd11`。每500步验证4个固定窗口，每2000步及最终保存权重和完整state。
+
+- **Latent-Repeat 首次正式训练故障（2026-09-22 05:59 UTC）**：step500首次验证时，公共trainer的 `_to_batched_eval_sample` 白名单丢弃 `repeat_pose/repeat_gripper`，新模型报KeyError后退出；未达step2000保存点，无可续训checkpoint。原smoke未覆盖公共trainer验证适配层。修复仅在新增模型子类内：验证时从保留的当前/未来数值pose和未来gripper还原目标，当前gripper读取无VAE的GT RAY0；不修改公共trainer。补测脚本 `scripts/audit_libero_latent_repeat_validation.py`，结果目录 `evaluate_results/libero/latent_repeat_validation_fix_20260922/`。正式训练尚未重启。
+
+- **2026-09-22 八卡完整短流程通过后重启**：诊断 `evaluate_results/libero/latent_repeat_e2e_20260922_062604/REPORT.md`，两步训练＋每步真实4窗口验证＋权重/完整state保存，然后从step1恢复并完成step2验证保存；两段exit0。关闭期NFS临时文件清理Errno16不影响已验证的state恢复。正式run `runs/libero_goal_latent_repeat_absolute_ray0_wan21/2026-09-22_06-34-36`，保持8卡batch4/GA4、10epoch/4140步、LR1e-4、RGB/action1:5、每500步验证、2000步及最终保存完整state/权重；从预训练初始化重新开始，不使用短测权重。
+
+- **Latent-Repeat Goal 3090评测准备（2026-09-22）**：选`ainode16 /172.16.12.17`，独立目录`/mnt/data/cfy/FastWAM/eval_preparations/latent_repeat_goal_20260922`；短rollout实际加载step2000、执行两次replan并保存视频，exit0，峰值reserved14.37GiB；8卡每卡1worker，Goal10×50、replan8、denoise20、原始RGB VAE，等待最终step4140。启动流程与检查记录：`evaluate_results/libero/latent_repeat_3090_prepare_20260922_135110/README.md`。正式评测尚未启动。
+
+- **2026-09-22 14:58 UTC Latent-Repeat最终Goal评测已启动**：本机训练正常结束（exit0），step4140完整state含8份优化器分片与8份RNG状态；最终权重传至ainode16并校验SHA256。tmux `goal_latent_repeat_eval`，8卡每卡1worker，Goal10×50，原始RGB VAE、replan8、20步去噪、seed42。远端输出`/mnt/data/cfy/FastWAM/eval_preparations/latent_repeat_goal_20260922/evaluate_results/goal_step4140_original_replan8_ep50_20260922_145809`；首批8任务运行、2任务排队。
+
+- **15:00 UTC评测启动修正**：初次多worker子tmux未继承LIBERO_CONFIG_PATH，停在路径交互提示，尚未推理。仅修改3090独立快照scheduler，每个worker显式source environment.sh；停止本次两个会话后重新启动。实际输出目录改为`/mnt/data/cfy/FastWAM/eval_preparations/latent_repeat_goal_20260922/evaluate_results/goal_step4140_original_replan8_ep50_20260922_150003`。已确认8个worker均加载step4140，正式430步上限rollout运行，GPU约15.5GB；旧输出保留。
+
+### 2026-09-23：四-suite absolute RAY0 / relative action VAE准备
+
+新增独立入口`scripts/prepare_all4_absolute_ray0_decoder.py`和配置`configs/vae/libero_all4_absolute_ray0_decoder_wan21_bs2_ga4_lr1e-5_ep2.json`，复用原始Wan2.1 Rothko缓存，只训conv2+decoder。包含尾部padding，264409训练窗口、1632训练episodes；80验证episodes/400固定完整窗口（每episode5个，排除尾部padding窗口），按8卡分摊验证。默认8卡bs2/GA4、LR1e-5、2epoch/8264步、warmup413，每500步及最终完整保存、导出和验证。未来相对位姿解码必须传当前EE观测。用户随后确认不监督padding：保持全部frame-start窗口与edge-repeat输入，但重建loss仅监督RAY0和有效未来帧，DDP按跨rank有效帧数归一化。CPU24窗口检查与padding梯度检查已通过；GPU完整验证状态见`evaluate_results/libero/all4_absolute_ray0_decoder_preparation_val400_20260923/README.md`及日志。未启动正式训练。
+
+- 最终val协议：80个独立验证episodes，每episode均匀取5个完整horizon窗口，共400个，无尾部padding窗口。八卡实测首轮val16.77秒（含验证VAE加载与汇总），训练首步8.3秒；保存完整state＋导出＋val约50余秒。预计8264步含周期保存验证约20–23小时。240个覆盖40任务/训练验证/首尾窗口的缓存审计全部BF16逐值一致。新入口修复八卡输出目录创建竞态（初始化进程组后在创建日志前同步）；诊断旧失败日志保留，正式长训练尚未启动。
+
+- **2026-09-23 01:30 UTC 已授权启动正式四-suite absolute RAY0 / relative-action VAE**：tmux `all4_absolute_ray0_vae_train`，run `runs/libero_all4_absolute_ray0_decoder_wan21_bs2_ga4_lr1e-5_ep2`，启动日志`/mnt/hwdata/cfy/FastWAM/evaluate_results/libero/all4_absolute_ray0_vae_launch_20260923_013046`。8卡bs2/GA4有效64，2epoch/8264步，LR1e-5，只训conv2+decoder；padding不计重建loss；每500步及最终完整保存、导出、400完整窗口验证。新建训练，不加载smoke权重。
+
+### 2026-09-23：四-suite训练完成后的三机 LIBERO-Plus 评测准备
+
+由用户通知启动，不自动等待或启动。DiT采用ainode06的absolute-RAY0四-suite run最终step21700，VAE采用本机同表示decoder微调最终step8264；最终产物和训练完成状态届时复核。保持相对future-action、共享四-suite stats、replan8、20步去噪、seed42、legacy/anchor0、不ensemble。
+
+- ainode16（3090）：Object2518 + Spatial偶数task_id1201，共3719，每卡1worker。
+- ainode18（3090）：Goal2591 + Spatial奇数task_id1201，共3792，每卡1worker。
+- ainode06（A800）：完整LIBERO-10的2519场景，每卡4worker。
+- 每台8卡；Plus全部10030场景各1次，固定任务清单无交集且无遗漏。新增独立wrapper，不改现有manager/worker。最终使用隔离快照、SHA256检查、按结果身份续跑。
+- 代码/清单/传输和启动步骤：`experiments/libero_plus/absolute_ray0_three_host/README.md`。当前仅准备及CPU检查；远端依赖、EGL和最终权重组合短rollout尚待传输后确认。没有启动评测。
+
+### 2026-09-23：当前 absolute RAY0＋relative-action 三表示100窗口复核
+
+已完成独立GT round-trip诊断，未改训练/评测代码。严格复用20260921 OSC诊断的Goal100个窗口（每任务10个episode，各1窗口），改为当前四-suite配置的绝对RAY0和相对当前EE的未来位姿；原始Wan2.1 VAE、BF16、batch1、17帧224×448、legacy/anchor0。Flatten CHW用相同逐帧物理bounds（RAY0绝对min/max、未来相对Q99.95）及裁剪，编码8维数值重复后reshape；解码未来局部位姿均通过同一当前EE观测还原。Shuffled使用固定seed42像素置换。
+
+100窗口×3表示×3链路=900记录覆盖检查通过。尾部edge-repeat输入、统计排除padding，全16步1459个有效目标；其中4个超范围目标发生相同平移裁剪，均在后8步，直接编解码全16步平移均值0.03066mm，不应表述为所有目标完全无损。没有四元数退化。
+
+| 表示 | VAE前8步平移均值/P95 mm | 旋转均值/P95 ° | 夹爪二值错误率 |
+|---|---:|---:|---:|
+| Rothko | 4.572/10.149 | 1.191/2.442 | 0% |
+| Flatten CHW | 70.764/113.751 | 122.595/171.700 | 12.583% |
+| Shuffled | 60.317/103.808 | 25.711/63.315 | 0.662% |
+
+全16步平移/旋转均值依次为3.776mm/1.018°、79.404mm/117.940°、66.667mm/23.622°。结论仅针对原始冻结VAE的GT重建适配性，不是DiT学习或闭环SR。完整脚本、逐窗口及直接/BF16/VAE对照见`evaluate_results/libero/absolute_ray0_relative_repr100_20260923/`，汇总`results/SUMMARY.md`。
+
+### 2026-09-23：Goal absolute-RAY0 DiT＋最终四-suite VAE评测
+
+本机VAE已正常完成8264步，完整恢复点及完整BF16 VAE导出保存；最终400窗口验证位置0.745mm、旋转0.109°。用户授权后启动Goal 10任务×50次评测：Goal absolute-RAY0/relative-action DiT run `2026-09-21_18-42-23` step4140，配本次四-suite同表示VAE step8264；8卡、max_tasks_per_gpu=2、replan8、20去噪、seed42、legacy/anchor0、不ensemble。与20260922原始VAE评测共用DiT、dataset_stats及协议，仅替换VAE并允许明确的VAE身份差异。
+
+tmux `goal_absolute_ray0_vae8264_eval`；启动记录`evaluate_results/libero/goal_absolute_ray0_wan21_vae8264_eval_launch_20260923_202057`；输出`evaluate_results/libero/goal_absolute_ray0_wan21_step4140_vae8264_replan8_ep50_20260923_202057`。这是普通LIBERO Goal500，不是LIBERO-Plus；另一台A800四-suite DiT训练未改动。
+
+### 2026-09-24：Goal mask 消融改用绝对 RAY0＋相对 action
+
+用户确认本轮两组都采用 `libero_rothko`、`frame0_pose_mode=absolute`：RAY0 为当前世界坐标 EE 位姿，未来16步为相对当前 EE 的目标位姿。此记录覆盖本轮 mask 训练的旧“全绝对”设定；旧配置和历史实验保留。
+
+- 本机 ainode07：`libero_goal_absolute_ray0_relative_mask_decoupled_wan21`，8卡，`rgb_raymap_decoupled`。
+- 另一台 ainode06：`libero_goal_absolute_ray0_relative_mask_future_bidirectional_wan21`，8卡，`rgb_raymap_future_bidirectional`。
+- 两组均 Wan2.1 1.3B 全量 DiT、原始冻结 VAE；共用 Goal 52895窗口缓存 `data/libero_goal_rothko_absolute_ray0_wan21_bf16_h16_latents_20260921` 和 BF16 batch1 文本缓存。
+- 10epoch，batch4/GPU、GA4、有效batch128，预计4140步；LR1e-4、warmup5%、cosine，RGB/action loss=1/5，BF16，无gradient checkpointing。
+- 每1000步验证既定4固定窗口；每2000步和最终保存权重及完整state。独立配置不修改旧基线。
+- 6项mask测试通过；缓存dataset contract、52895窗口、latent shape `[16,5,28,56]` 和原始VAE哈希通过预检。
+- 启动脚本 `scripts/train_goal_relative_mask_8gpu.sh`；检查及训练日志 `evaluate_results/libero/goal_relative_mask_launch_20260924/`。
+- **正式启动**：ainode07 Decoupled run `runs/libero_goal_absolute_ray0_relative_mask_decoupled_wan21/2026-09-24_15-26-29`，W&B `z0qs2lu1`；ainode06 Bidirectional run `runs/libero_goal_absolute_ray0_relative_mask_future_bidirectional_wan21/2026-09-24_15-27-53`，W&B `vte1ht5j`。两边日志确认 `world_size=8`、GA4、`max_steps=4140`、trainable DiT参数1,418,996,800。展开配置差异仅mask、run名与输出目录，见启动目录 `config_differences.json`。
+- **2026-09-25 Goal闭环评测启动**：两台各8卡，分别评测本机Decoupled和ainode06 Bidirectional的最终step4140；原始Wan2.1 VAE、legacy/anchor0、seed42、replan8、20步去噪、无action ensemble，10任务×50场=500场/组，10任务同时运行（每卡最多2worker，时限12h）。两组均保留各自训练mask。启动日志 `evaluate_results/libero/goal_relative_mask_eval_20260925/`；结果目录 `evaluate_results/libero/goal_relative_mask_{decoupled,future_bidirectional}_step4140_original_replan8_ep50_20260925`（对应机器）。
+
+
+### 2026-09-25：新增 Shuffled Action Raymap Goal 训练
+
+用户重新授权训练 Shuffled 表示，补充此前仅做离线重建的计划。独立配置 `configs/task/libero_goal_shuffled_raymap_wan21.yaml`；绝对 RAY0、相对当前 EE 的未来目标，Wan2.1 1.3B 全量 DiT、原始冻结 VAE、基线 attention mask。每个224×224 tile 内以 seed42 固定置换 UV，三个颜色通道一起移动，两份 tile 使用同一置换；解码先逆置换。置换 SHA256：`7d2c094e41ab74856c4a3aeb01491853ecdc06df8a3aa266241c2f54ea74cfae`。
+
+- 训练：10epoch，8卡 batch4/GPU、GA4，有效batch128，预计4140步；LR1e-4、warmup5%、cosine、RGB/action loss=1:5。每1000步验证4个固定窗口，每2000步及最终保存权重与完整state。
+- 缓存：52895窗口，RGB逐位复用 `data/libero_goal_rothko_absolute_ray0_wan21_bf16_h16_latents_20260921`，动作重新编码到 `data/libero_goal_shuffled_raymap_wan21_bf16_h16_seed42_20260925`，不覆盖基线缓存。
+- 隔离代码快照和启动脚本位于 ainode06 的 `video_a800/libero_goal_shuffled_20260925/`；tmux `goal_shuffled_raymap_train`。队列依次运行8卡每卡4个缓存worker、缓存/在线一致性检查、8卡训练；任一步失败即停止。日志在该目录 `logs/`，检查结果在 `smoke/`。
+- 启动前已通过5窗口（含尾部）与基线逐像素对应、逆置换直接解码、padding/RGB/text不变检查；GPU单步训练、20步推理及checkpoint身份隔离通过，单步loss0.08588、梯度有限。此为流程检查，不代表模型效果。
