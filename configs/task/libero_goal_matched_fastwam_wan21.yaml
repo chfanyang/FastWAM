@@ -1,0 +1,29 @@
+# @package _global_
+defaults:
+  - libero_goal_rothko_absolute_ray0_2cam224_full_wan21_1_3b_1e-4
+  - override /model: fastwam_matched_wan21
+  - _self_
+output_dir: ./runs/libero_goal_matched_fastwam_wan21/${now:%Y-%m-%d_%H-%M-%S}
+batch_size: 4
+gradient_accumulation_steps: 8
+num_epochs: 10
+eval_every: 500
+# Trainer derives the interval from this run's steps per epoch (currently 414).
+save_every: 414
+save_every_epochs: 1
+state_save_every: 2000
+save_at_end: true
+eval_num_samples: 4
+eval_num_inference_steps: 20
+data:
+  train:
+    _target_: fastwam.libero_matched_fastwam.MatchedGoalDataset
+    latent_cache_dir: ./data/libero_goal_rothko_absolute_ray0_wan21_bf16_h16_latents_20260921
+    text_embedding_cache_dir: ./data/text_embeds_cache/libero_wan21_bf16_batch1
+    sample_error_mode: raise
+finetune:
+  method: full
+  train_proprio_encoder: true
+wandb:
+  name: libero_goal_matched_fastwam_wan21
+  group: libero_goal_architecture_comparison
