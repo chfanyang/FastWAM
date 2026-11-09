@@ -512,3 +512,42 @@ tmux `goal_absolute_ray0_vae8264_eval`；启动记录`evaluate_results/libero/go
 - 缓存：52895窗口，RGB逐位复用 `data/libero_goal_rothko_absolute_ray0_wan21_bf16_h16_latents_20260921`，动作重新编码到 `data/libero_goal_shuffled_raymap_wan21_bf16_h16_seed42_20260925`，不覆盖基线缓存。
 - 隔离代码快照和启动脚本位于 ainode06 的 `video_a800/libero_goal_shuffled_20260925/`；tmux `goal_shuffled_raymap_train`。队列依次运行8卡每卡4个缓存worker、缓存/在线一致性检查、8卡训练；任一步失败即停止。日志在该目录 `logs/`，检查结果在 `smoke/`。
 - 启动前已通过5窗口（含尾部）与基线逐像素对应、逆置换直接解码、padding/RGB/text不变检查；GPU单步训练、20步推理及checkpoint身份隔离通过，单步loss0.08588、梯度有限。此为流程检查，不代表模型效果。
+
+
+### 2026-11-07：Goal Wan2.1 Video Model＋Action Expert 公平对照
+
+参照 `evaluate_results/libero/closed_loop/goal_absolute_ray0_wan21_step4140_vae8264_replan8_ep50_20260923_202057`。新增独立工厂、数据适配、训练/评测入口；旧FastWAM及Action Raymap实现与配置均不修改。Wan2.1 Video DiT＋从同源权重插值初始化的Action Expert，当前绝对EE位姿/夹爪数值proprio，未来16步相对目标位姿8维数值动作；17帧RGB、同一Goal52895窗口、原始冻结VAE及BF16 batch1文本。复用已验证RGB缓存，不消费动作VAE latent。4卡每卡batch4/GA8，10epoch/4140步、有效batch128、LR1e-4、warmup5%、loss1:5，可评测weight每epoch保存一次（当前414步/epoch），完整state每2000步+最终；闭环Goal500、replan8、20步去噪、同一目标转OSC控制代码。
+
+详见 [MATCHED_FASTWAM_GOAL.md](experiments/libero/MATCHED_FASTWAM_GOAL.md)。CPU配置/五窗口数据对齐/缩小MoT前后向及动作推理检查记录在 `evaluate_results/libero/preparation/matched_fastwam_goal_20261107/`。正式Action Expert初始化文件已于2026-11-07生成，耗时58.82秒、峰值RSS13.83GiB，来源/形状/数值检查通过；正式训练尚未启动，完整尺寸GPU与4卡恢复检查待做。98.2%参照模型使用额外四-suite decoder微调，故此为完整系统对照，需同时说明其与原始VAE93.0%结果的区别；不能声称只改变架构且总训练数据/计算完全一致。
+
+### 2026-11-08：Goal 旋转区域常量轴角表示消融
+
+保留当前绝对 RAY0＋未来相对当前 EE 的16步目标、中心平移和外框夹爪；只把旋转方向场改为整片常量三维最短轴角向量，除以 pi 映射到图像范围。RAY0 编码绝对旋转，未来帧编码 `conj(q0)*q_target`。两个224×224 tile 横向复制；读取时先均值合并对应像素，再在安全旋转区域逐分量取中位数，乘 pi、转四元数，结合当前观测 EE 恢复目标。没有方向场SVD和anchor校正。独立codec/dataset/model/factory/config/eval入口，不修改既有共享流程。详细命令及限制见 [AXIS_ANGLE_GOAL.md](experiments/libero/AXIS_ANGLE_GOAL.md)。
+
+同一组Goal100窗口的原始冻结Wan2.1 VAE重建诊断，前8步755个有效目标：常量轴角平移均值/P95 **4.466/9.405 mm**、旋转 **2.019/4.594°**、夹爪错误0%；原Action Raymap分别 **4.572/10.149 mm**、**1.191/2.442°**、0%。这些是GT→VAE→动作误差，不是DiT预测或闭环成功率。最终修正审计目录 `evaluate_results/libero/offline_audits/axis_angle_vae100_20261108_quaternion/`；包含精确180°姿态的局部四元数实现修正，未修改公共旋转转换函数或其他表示。
+
+准备检查目录 `evaluate_results/libero/preparation/axis_angle_pipeline_20261108/`：5项codec测试＋3项pipeline测试通过；256窗口缓存逐位RGB复用、动作在线一致、batch1/2一致及hash检查通过；5个真实窗口（含15步padding尾窗）对齐原始parquet；完整Wan2.1 batch1前后向、2步推理与公共trainer的20步验证入口通过。17帧训练编码的首个latent与单帧推理编码逐位一致。19.39–19.52 GiB是无优化器的batch1诊断显存，不代表正式batch4＋AdamW/ZeRO显存。
+
+完整新动作缓存正在独立tmux `goal_axis_angle_cache_20261108` 生成：8卡每卡4worker、BF16 batch2，共52895窗口、26.54 GB；RGB逐位复用原Goal缓存，文本和norm_stats保持一致，新目录 `data/libero_goal_axis_angle_constant_wan21_bf16_h16_224x448_20261108`。分片可恢复，最终需hash＋在线复核成功。正式DiT训练尚未启动。准备配置为8卡bs4/GA4、有效128、10epoch/4140步、LR1e-4/warmup5%、原始冻结VAE、原mask及RGB/action1:5；每epoch保存可eval权重，完整state每2000步＋最终，验证每500步。闭环按Goal500场、replan8、20步去噪、原始VAE、同一pose→OSC流程，预设最终step4140用于对比。
+
+**缓存完成更新（2026-11-08）**：52895窗口／207分片全部完成，所有分片hash通过、全量RGB逐位复用、32个worker编码探针通过；最终索引 `[0,122,137,26447,52894]` 在线动作编码与缓存逐位一致，`_SUCCESS`、`metadata.json.complete` 和 `check_online.json` 均确认完成。另有2项真实评测辅助接口测试通过，确认新模型工厂参数及现有pose→OSC控制保持一致。已具备启动条件，但用户明确要求**先不启动训练**；缓存工作流不会自动接着训练。
+
+**用户随后授权正式启动（2026-11-08 17:31:45 UTC）**：8卡训练已单独启动，tmux `goal_axis_angle_train_20261108`；全新run `runs/libero_goal_axis_angle_constant_wan21/2026-11-08_17-31-45`，未覆盖旧实验。DeepSpeed ZeRO1、world_size8、bf16、bs4/GA4、10epoch/4140步；每epoch权重、每2000步＋最终完整state、每500步验证。W&B run `tjtcojxo` 已连通。启动记录/源码快照/日志在 `evaluate_results/libero/launch_records/goal_axis_angle_8gpu_2026-11-08_17-31-45/`。
+
+### 2026-11-09：VLABench all10 step18000 续训准备，暂不启动
+
+用户暂定完整可续训state改为每1000 optimizer steps＋结束保存。独立配置 `configs/vlabench_all10_resume18000_state1000.yaml` 以最近一次实际续训配置为快照，恢复同一原run的 `checkpoints/state/step_018000`；`state_save_every=1000`、`state_save_every_epochs=null`、`save_at_end=true`，避免epoch间隔覆盖步数间隔。下一完整恢复点step19000。其余模型、数据、原始冻结VAE、scheduler、有效batch128、总44490步及验证/权重规则保持原样；继续原W&B run `7ypn8sop`。
+
+已将归档的2410字节cache_index.json逐字节复制回原配置引用位置，仅恢复这个小索引，缓存数据和归档结果不移动、不覆盖；这使原state的严格resume语义指纹保持一致，SHA256为 `f23f163ef4b53f4039ea9cd4a6b4429050545630e41f231af373f33fbc8cc34b`，无需放宽resume校验。检查记录 `evaluate_results/vlabench/preparation/resume18000_state1000_20261109/`。启动脚本 `scripts/resume_vlabench_all10_18000_state1000_8gpu.sh` 已准备，**未执行；等待用户后续启动指令**。
+
+### 2026-11-09：比例缩小 Action Expert 的 FastWAM Goal 8卡训练
+
+用户先提出后4卡、随后改为8卡。4卡准备未执行；现使用独立 task `libero_goal_matched_fastwam_ratio20_wan21_8gpu` 和启动脚本 `scripts/train_matched_fastwam_ratio20_8gpu.sh`。Wan2.1 Video DiT 1,418,996,800参数；Action Expert hidden560/FFN2240、30层/12头/head_dim128，共287,376,248参数，占Video20.25%。初始化为此前已核验的 `checkpoints/ActionDiT_matched_Wan21_560hdim_pose8.pt`；旧1024宽度模型及结果保持不变。
+
+8卡bs4/GA4，有效128；Goal52895窗口、原RGB与文本缓存、绝对当前state＋16步相对目标8维动作；原始冻结RGB VAE，RGB/action loss1:5，LR1e-4/warmup5%、10epoch/4140步。Video、Action Expert及MoT混合注意力的梯度检查点全部关闭。用户确认**可eval权重每epoch（414步）保存，完整可续训state每2epoch（828步）及最终保存**，验证每500步。2epoch墙钟先按约1小时估计，待正式速度校准。新模型短测完成首批迭代后实测每卡约45.8GiB；该数值不是旧1024宽度模型的历史峰值。
+
+启动队列tmux `goal_fastwam_ratio20_8gpu_20261109_023951`，记录 `evaluate_results/libero/launch_records/matched_fastwam_ratio20_8gpu_20261109_023951/`。先在独立smoke目录做2步训练/验证/完整state保存，再从step1恢复到step2，检查通过后自动启动正式新run `runs/libero_goal_matched_fastwam_ratio20_wan21_8gpu/20261109_023951`。两阶段配置/日志/状态分别保存，W&B仅正式阶段开启；VLABench续训不在此队列中。
+
+恢复短测已通过，队列已进入正式阶段：8份优化器分片齐全，scheduler、8rank CUDA RNG及trainer进度一致；BF16参数非逐位一致，MoT参数有0.0807%不同，最大绝对差0.00024414，差异RMS约为单步更新RMS的2.22%；proprio为3.69%。满足预先设定的数值恢复容差，不声称GPU逐位确定性。完整记录 `resume_check.json`。正式训练从原始初始化重新开始，不继承smoke更新。
+
+正式run已进入step10/4140，W&B `8lr59cu6` 已连接。起始实测约0.25 step/s（每步约4秒），总训练先估4.5小时左右，828步约55分钟＋验证/保存开销，与每约1小时完整恢复点相符；后续以稳态日志为准。
