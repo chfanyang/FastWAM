@@ -1,0 +1,22 @@
+# @package _global_
+defaults:
+  - sim_libero
+  - override /task: libero_goal_axis_angle_constant_wan21
+  - _self_
+model:
+  load_text_encoder: true
+EVALUATION:
+  task_suite_name: libero_goal
+  num_trials: 50
+  replan_steps: 8
+  action_horizon: 16
+  num_inference_steps: 20
+  dataset_stats_path: ./data/libero_mujoco3.3.2/dataset_stats.json
+  save_prediction_videos: false
+  visualize_future_video: false
+  use_action_ensembler: false
+  binarize_gripper: true
+  output_dir: ./evaluate_results/libero/closed_loop/goal_axis_angle_constant_wan21/${now:%Y%m%d_%H%M%S}
+MULTIRUN:
+  task_suite_names: [libero_goal]
+  worker_timeout_seconds: 43200
