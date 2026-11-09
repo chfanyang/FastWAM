@@ -1,0 +1,220 @@
+# Independent resume snapshot: only full-state save cadence changes.
+# No training is launched when composing this configuration.
+output_dir: ./runs/vlabench_all10_rothko_all_absolute_3cam192_wan21/20260917_103108
+batch_size: 4
+num_workers: 4
+pin_memory: true
+lr_scheduler_type: cosine
+learning_rate: 0.0001
+warmup_ratio: 0.05
+num_epochs: 10
+max_steps: null
+log_every: 10
+save_every: 1000
+state_save_every: 1000
+save_at_end: true
+eval_every: 1000
+eval_at_start: false
+eval_num_inference_steps: 20
+eval_sample_index: 0
+eval_num_samples: 4
+eval_random_seed: 42
+gradient_accumulation_steps: 4
+mixed_precision: bf16
+seed: 42
+max_grad_norm: 1.0
+weight_decay: 0.01
+resume: /mnt/hwdata/cfy/FastWAM/runs/vlabench_all10_rothko_all_absolute_3cam192_wan21/20260917_103108/checkpoints/state/step_018000
+resume_allow_config_mismatch: false
+finetune:
+  method: full
+  train_proprio_encoder: false
+  lora:
+    rank: 16
+    alpha: 16.0
+    dropout: 0.0
+    target_modules:
+    - self_attn.q
+    - self_attn.k
+    - self_attn.v
+    - self_attn.o
+    - cross_attn.q
+    - cross_attn.k
+    - cross_attn.v
+    - cross_attn.o
+wandb:
+  enabled: true
+  workspace: null
+  project: fast-wam
+  name: vlabench_all10_rothko_all_absolute_3cam192_wan21
+  group: vlabench_rothko
+  mode: online
+data:
+  train:
+    _target_: fastwam.datasets.vlabench_multitask_cached.VLABenchMultitaskCachedDataset
+    dataset_dir: ./data/vlabench_primitive_ft_lerobot
+    split_manifest: ./data/vlabench_primitive_ft_lerobot/manifests/episode_split_val01_seed42.json
+    split: train
+    rothko_norm_stats: ./data/vlabench_primitive_ft_lerobot/norm_stats/vlabench_rothko_all_absolute_minmax_margin01_h16_192x576_centerfrac05_train99_all10.pt
+    pretrained_norm_stats: ./data/vlabench_primitive_ft_lerobot/norm_stats/vlabench_rothko_all_absolute_minmax_margin01_h16_192x576_centerfrac05_train99_all10.json
+    text_embedding_cache_dir: ./data/text_embeds_cache/vlabench
+    context_len: 128
+    video_size:
+    - 192
+    - 576
+    include_text_context: true
+    episode_cache_size: 2
+    rothko_config:
+      image_height: 192
+      image_width: 576
+      tile_height: 192
+      tile_width: 192
+      focal: 0.2
+      center_scale: 1.0
+      dir_scale: 1.0
+      center_frac: 0.5
+      boundary_margin: 8
+      outer_margin: 8
+      duplicate_horizontal: true
+      frame0_pose_mode: absolute
+      horizontal_copies: 3
+      absolute_position_min:
+      - -0.486968914270401
+      - -0.06711820721626281
+      - -0.023272830285131933
+      absolute_position_max:
+      - 0.4814973866939545
+      - 0.812754819393158
+      - 0.6373460388183594
+    camera_layout: three_camera_192
+    cache_scope: task
+    task_names: null
+    latent_cache_dir: null
+    latent_cache_only: true
+    raymap_representation: vlabench_rothko_all_absolute
+    cache_index_path: ./evaluate_results/vlabench/cache_all10_absolute_20260916_235830/cache_index.json
+  val:
+    _target_: fastwam.datasets.vlabench_video.VLABenchVideoDataset
+    dataset_dir: ./data/vlabench_primitive_ft_lerobot
+    split_manifest: ./data/vlabench_primitive_ft_lerobot/manifests/episode_split_val01_seed42.json
+    split: val
+    rothko_norm_stats: ./data/vlabench_primitive_ft_lerobot/norm_stats/vlabench_rothko_all_absolute_minmax_margin01_h16_192x576_centerfrac05_train99_all10.pt
+    pretrained_norm_stats: ./data/vlabench_primitive_ft_lerobot/norm_stats/vlabench_rothko_all_absolute_minmax_margin01_h16_192x576_centerfrac05_train99_all10.json
+    text_embedding_cache_dir: ./data/text_embeds_cache/vlabench
+    context_len: 128
+    include_text_context: true
+    episode_cache_size: 2
+    rothko_config:
+      image_height: 192
+      image_width: 576
+      tile_height: 192
+      tile_width: 192
+      focal: 0.2
+      center_scale: 1.0
+      dir_scale: 1.0
+      center_frac: 0.5
+      boundary_margin: 8
+      outer_margin: 8
+      duplicate_horizontal: true
+      frame0_pose_mode: absolute
+      horizontal_copies: 3
+      absolute_position_min:
+      - -0.486968914270401
+      - -0.06711820721626281
+      - -0.023272830285131933
+      absolute_position_max:
+      - 0.4814973866939545
+      - 0.812754819393158
+      - 0.6373460388183594
+    camera_layout: three_camera_192
+    cache_scope: full_split
+    task_names: null
+    video_size:
+    - 192
+    - 576
+    raymap_representation: vlabench_rothko_all_absolute
+model:
+  _target_: fastwam.runtime.create_fastwam_video_only_raymap
+  model_id: Wan-AI/Wan2.1-T2V-1.3B
+  tokenizer_model_id: Wan-AI/Wan2.1-T2V-1.3B
+  tokenizer_max_len: 128
+  load_text_encoder: false
+  proprio_dim: null
+  redirect_common_files: true
+  vae_safetensors_path: null
+  allow_vae_mismatch: false
+  inference_predict_future_rgb: false
+  skip_dit_load_from_pretrain: false
+  action_horizon: 16
+  raymap_representation: vlabench_rothko_all_absolute
+  rothko_norm_stats: ./data/vlabench_primitive_ft_lerobot/norm_stats/vlabench_rothko_all_absolute_minmax_margin01_h16_192x576_centerfrac05_train99_all10.pt
+  rothko_decode_mode: legacy
+  rothko_decode_anchor_alpha: 0.0
+  rothko_decode_block_grid: 4
+  video_dit_config:
+    has_image_input: false
+    patch_size:
+    - 1
+    - 2
+    - 2
+    in_dim: 16
+    hidden_dim: 1536
+    ffn_dim: 8960
+    freq_dim: 256
+    text_dim: 4096
+    out_dim: 16
+    num_heads: 12
+    attn_head_dim: 128
+    num_layers: 30
+    eps: 1.0e-06
+    seperated_timestep: true
+    require_clip_embedding: false
+    require_vae_embedding: false
+    fuse_vae_embedding_in_latents: true
+    use_gradient_checkpointing: false
+    video_attention_mask_mode: rgb_then_raymap_block_causal
+    action_conditioned: false
+    action_dim: 7
+    action_group_causal_mask_mode: group_diagonal
+  scheduler:
+    train_shift: 5.0
+    infer_shift: 5.0
+    num_train_timesteps: 1000
+  loss:
+    lambda_rgb: 1.0
+    lambda_raymap: 5.0
+  rothko_config:
+    image_height: 192
+    image_width: 576
+    tile_height: 192
+    tile_width: 192
+    focal: 0.2
+    center_scale: 1.0
+    dir_scale: 1.0
+    center_frac: 0.5
+    boundary_margin: 8
+    outer_margin: 8
+    duplicate_horizontal: true
+    frame0_pose_mode: absolute
+    horizontal_copies: 3
+    absolute_position_min:
+    - -0.486968914270401
+    - -0.06711820721626281
+    - -0.023272830285131933
+    absolute_position_max:
+    - 0.4814973866939545
+    - 0.812754819393158
+    - 0.6373460388183594
+  future_rgb_mode: joint
+  model_variant: wan2.1-t2v-1.3b
+save_every_epochs: 1
+state_save_every_epochs: null
+eval_sample_manifest: ./data/vlabench_primitive_ft_lerobot/manifests/validation_windows_10task_20samples_seed42.json
+save_before_eval: true
+eval_empty_cuda_cache: true
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
