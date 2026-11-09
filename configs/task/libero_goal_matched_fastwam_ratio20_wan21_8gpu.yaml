@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - libero_goal_matched_fastwam_ratio20_wan21
+  - _self_
+output_dir: ./runs/libero_goal_matched_fastwam_ratio20_wan21_8gpu/${now:%Y-%m-%d_%H-%M-%S}
+batch_size: 4
+gradient_accumulation_steps: 4
+state_save_every: null
+state_save_every_epochs: 2
+save_at_end: true
+wandb:
+  name: libero_goal_matched_fastwam_ratio20_wan21_8gpu
+  group: libero_goal_architecture_comparison_ratio20

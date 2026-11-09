@@ -1,0 +1,10 @@
+# @package _global_
+# Independent proportional Action Expert; the previous 1024-width run is unchanged.
+defaults:
+  - libero_goal_matched_fastwam_wan21
+  - override /model: fastwam_matched_wan21_ratio20
+  - _self_
+output_dir: ./runs/libero_goal_matched_fastwam_ratio20_wan21/${now:%Y-%m-%d_%H-%M-%S}
+wandb:
+  name: libero_goal_matched_fastwam_ratio20_wan21
+  group: libero_goal_architecture_comparison_ratio20

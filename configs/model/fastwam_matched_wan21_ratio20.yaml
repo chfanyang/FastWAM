@@ -1,0 +1,51 @@
+# Independent proportional Action Expert: 287,376,248 parameters, 20.25% of Video DiT.
+_target_: fastwam.libero_matched_fastwam.create_model
+load_text_encoder: false
+skip_dit_load_from_pretrain: false
+action_dit_pretrained_path: ./checkpoints/ActionDiT_matched_Wan21_560hdim_pose8.pt
+rothko_config: ${data.train.rothko_config}
+rothko_norm_stats: ${data.train.rothko_norm_stats}
+video_dit_config:
+  has_image_input: false
+  patch_size:
+  - 1
+  - 2
+  - 2
+  in_dim: 16
+  hidden_dim: 1536
+  ffn_dim: 8960
+  freq_dim: 256
+  text_dim: 4096
+  out_dim: 16
+  num_heads: 12
+  attn_head_dim: 128
+  num_layers: 30
+  eps: 1.0e-06
+  seperated_timestep: true
+  require_clip_embedding: false
+  require_vae_embedding: false
+  fuse_vae_embedding_in_latents: true
+  use_gradient_checkpointing: false
+  video_attention_mask_mode: first_frame_causal
+  action_conditioned: false
+  action_dim: 8
+  action_group_causal_mask_mode: group_diagonal
+action_dit_config:
+  action_dim: 8
+  hidden_dim: 560
+  ffn_dim: 2240
+  num_heads: 12
+  attn_head_dim: 128
+  num_layers: 30
+  text_dim: 4096
+  freq_dim: 256
+  eps: 1.0e-06
+  use_gradient_checkpointing: false
+video_scheduler:
+  train_shift: 5.0
+  infer_shift: 5.0
+  num_train_timesteps: 1000
+action_scheduler: ${model.video_scheduler}
+loss:
+  lambda_video: 1.0
+  lambda_action: 5.0
